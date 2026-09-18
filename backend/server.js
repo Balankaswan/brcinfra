@@ -53,21 +53,34 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 const connectDB = async () => {
   try {
     const mongoURI = process.env.MONGODB_URI;
+    if (!mongoURI) {
+      console.warn('⚠️ MONGODB_URI environment variable is not set!');
+      return;
+    }
     await mongoose.connect(mongoURI);
     console.log('✅ Connected to MongoDB Atlas successfully');
   } catch (error) {
-    console.error('❌ MongoDB connection failed:', error);
-    process.exit(1);
+    console.error('❌ MongoDB connection failed:', error.message);
   }
 };
 
 connectDB();
 
-// Health check
-app.get('/health', (req, res) => {
+// Root & Health checks
+app.get('/', (req, res) => {
+  res.json({
+    status: 'OK',
+    message: 'BRC Transport API Service is running',
+    dbState: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get(['/health', '/api/health'], (req, res) => {
   res.json({ 
     status: 'OK', 
     message: 'BRC Backend API is running',
+    dbState: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     timestamp: new Date().toISOString()
   });
 });

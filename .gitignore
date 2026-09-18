@@ -24,7 +24,8 @@ yarn-debug.log*
 yarn-error.log*
 
 # Database & Backups
-data/
+/data/
+!src/data/
 backup/
 backend/backups/
 *.log
