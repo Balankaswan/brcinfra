@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Plus, FileText, Edit, Download, Eye, Trash2, FileSearch, X, Link, Check } from 'lucide-react';
+import { Plus, FileText, Edit, Download, Eye, Trash2, FileSearch, X } from 'lucide-react';
 import { formatCurrency } from '../utils/numberGenerator';
 import { getNextSequenceNumber } from '../utils/sequenceGenerator';
 import BillForm from './forms/BillForm';
@@ -28,11 +28,7 @@ const BillsComponent: React.FC<BillsListProps> = ({ showOnlyFullyReceived = fals
   const [search, setSearch] = useState('');
   const [viewMode, setViewMode] = useState<'pending' | 'received'>('pending');
   const [selectedMonths, setSelectedMonths] = useState<string[]>([]);
-  // Add LR to existing bill
-  const [addLrBill, setAddLrBill] = useState<Bill | null>(null);
-  const [selectedNewLrIds, setSelectedNewLrIds] = useState<string[]>([]);
-  const [addLrLoading, setAddLrLoading] = useState(false);
-  const [addLrError, setAddLrError] = useState<string | null>(null);
+
 
   // Auto-scroll to highlighted bill
   useEffect(() => {
@@ -144,27 +140,6 @@ const BillsComponent: React.FC<BillsListProps> = ({ showOnlyFullyReceived = fals
     }
   };
 
-  // ── Add LR to existing Bill ──
-  const handleAddLrSubmit = async () => {
-    if (!addLrBill || selectedNewLrIds.length === 0) return;
-    setAddLrLoading(true);
-    setAddLrError(null);
-    try {
-      const response = await apiService.addLrToBill(addLrBill.id, selectedNewLrIds);
-      updateBill(response.bill);
-      // Mark LRs as billed locally too
-      selectedNewLrIds.forEach(lrId => {
-        const slip = loadingSlips.find(s => s.id === lrId || (s as any)._id === lrId);
-        if (slip) updateLoadingSlip({ ...slip, bill_number: response.bill.bill_number, bill_id: response.bill.id });
-      });
-      setAddLrBill(null);
-      setSelectedNewLrIds([]);
-    } catch (err: any) {
-      setAddLrError(err?.message || 'Failed to add LR to bill');
-    } finally {
-      setAddLrLoading(false);
-    }
-  };
 
 
   const handleDownloadPDF = async (bill: Bill) => {
@@ -827,17 +802,7 @@ const BillsComponent: React.FC<BillsListProps> = ({ showOnlyFullyReceived = fals
                           Mark as Received
                         </button>
                       )}
-                      <button
-                        onClick={() => {
-                          setAddLrBill(bill);
-                          setSelectedNewLrIds([]);
-                          setAddLrError(null);
-                        }}
-                        className="p-2 text-indigo-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
-                        title="Add LR to this Bill"
-                      >
-                        <Link className="w-4 h-4" />
-                      </button>
+
                       <button
                         onClick={() => handleDeleteBill(bill)}
                         className="p-2 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
@@ -1020,141 +985,6 @@ const BillsComponent: React.FC<BillsListProps> = ({ showOnlyFullyReceived = fals
         />
       )}
 
-      {/* ── Add LR to Bill Modal ── */}
-      {addLrBill && (() => {
-        // LRs that are not yet billed (no bill_number), plus not already on this bill
-        const existingLrIds = new Set([
-          ...(addLrBill.loading_slip_ids || []).map(String),
-          addLrBill.loading_slip_id ? String(addLrBill.loading_slip_id) : ''
-        ]);
-        const availableLRs = loadingSlips.filter(s => {
-          const id = s.id || (s as any)._id;
-          if (existingLrIds.has(String(id))) return false;
-          if (s.bill_number && s.bill_number.trim() !== '') return false; // already billed
-          return true;
-        });
-        // Prioritise same party — sort matched party to top
-        const billParty = (addLrBill.party || '').toLowerCase();
-        const sorted = [...availableLRs].sort((a, b) => {
-          const aMatch = (a.party || '').toLowerCase().includes(billParty) ? 0 : 1;
-          const bMatch = (b.party || '').toLowerCase().includes(billParty) ? 0 : 1;
-          return aMatch - bMatch;
-        });
-        return (
-          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-            <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
-              {/* Header */}
-              <div className="px-6 py-4 border-b flex items-center justify-between bg-indigo-50 rounded-t-xl">
-                <div>
-                  <h3 className="text-lg font-bold text-indigo-800 flex items-center gap-2">
-                    <Link className="w-5 h-5" /> Add LR to Bill #{addLrBill.bill_number}
-                  </h3>
-                  <p className="text-sm text-indigo-600 mt-0.5">Party: {addLrBill.party}</p>
-                </div>
-                <button onClick={() => { setAddLrBill(null); setSelectedNewLrIds([]); }} className="text-gray-400 hover:text-gray-700">
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              {/* Body */}
-              <div className="overflow-y-auto flex-1 p-4">
-                {availableLRs.length === 0 ? (
-                  <div className="text-center py-12 text-gray-500">
-                    <FileText className="w-12 h-12 mx-auto mb-3 text-gray-300" />
-                    <p className="font-medium">No unbilled LRs available</p>
-                    <p className="text-sm mt-1">All loading slips are either already billed or not yet created.</p>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    <p className="text-xs text-gray-400 mb-3">
-                      Showing {sorted.length} unbilled LR{sorted.length !== 1 ? 's' : ''}.
-                      {billParty && <span className="text-indigo-500 ml-1">Same-party LRs shown first.</span>}
-                    </p>
-                    {sorted.map(slip => {
-                      const slipId = slip.id || (slip as any)._id || '';
-                      const isSelected = selectedNewLrIds.includes(String(slipId));
-                      const freight = slip.total_amount || (slip as any).total_freight || (slip as any).freight || 0;
-                      const sameParty = (slip.party || '').toLowerCase().includes(billParty);
-                      return (
-                        <label
-                          key={slipId}
-                          className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${
-                            isSelected
-                              ? 'border-indigo-400 bg-indigo-50 shadow-sm'
-                              : 'border-gray-200 hover:border-indigo-300 hover:bg-gray-50'
-                          }`}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={isSelected}
-                            onChange={() => {
-                              setSelectedNewLrIds(prev =>
-                                isSelected ? prev.filter(id => id !== String(slipId)) : [...prev, String(slipId)]
-                              );
-                            }}
-                            className="mt-0.5 accent-indigo-600 w-4 h-4 shrink-0"
-                          />
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="font-semibold text-sm text-gray-900">
-                                LR: {slip.lr_number || slip.slip_number}
-                              </span>
-                              {sameParty && (
-                                <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">Same Party</span>
-                              )}
-                              <span className="text-xs text-gray-500">{slip.vehicle_no}</span>
-                            </div>
-                            <div className="text-xs text-gray-500 mt-0.5">
-                              {slip.from_location} → {slip.to_location}
-                              {slip.party && <span className="ml-2 text-gray-400">• {slip.party}</span>}
-                            </div>
-                          </div>
-                          <div className="text-right shrink-0">
-                            <div className="text-sm font-bold text-green-700">{formatCurrency(freight)}</div>
-                            <div className="text-xs text-gray-400">{new Date(slip.date || (slip as any).created_at || '').toLocaleDateString('en-IN')}</div>
-                          </div>
-                        </label>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Footer */}
-              <div className="px-6 py-4 border-t bg-gray-50 rounded-b-xl">
-                {addLrError && (
-                  <p className="text-red-600 text-sm mb-3 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{addLrError}</p>
-                )}
-                {selectedNewLrIds.length > 0 && (
-                  <p className="text-sm text-indigo-700 mb-3">
-                    <Check className="w-4 h-4 inline mr-1" />
-                    {selectedNewLrIds.length} LR{selectedNewLrIds.length > 1 ? 's' : ''} selected
-                  </p>
-                )}
-                <div className="flex justify-end gap-3">
-                  <button
-                    onClick={() => { setAddLrBill(null); setSelectedNewLrIds([]); }}
-                    className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleAddLrSubmit}
-                    disabled={selectedNewLrIds.length === 0 || addLrLoading}
-                    className="px-5 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                  >
-                    {addLrLoading ? (
-                      <><span className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full inline-block" />Adding...</>
-                    ) : (
-                      <><Link className="w-4 h-4" />Add {selectedNewLrIds.length > 0 ? selectedNewLrIds.length : ''} LR{selectedNewLrIds.length > 1 ? 's' : ''} to Bill</>
-                    )}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
     </div>
   );
 };

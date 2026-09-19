@@ -245,96 +245,9 @@ router.post('/', async (req, res) => {
   }
 });
 
-// ─── Add LR(s) to an existing Bill ───
-// POST /api/bills/:id/add-lr
-// body: { loading_slip_ids: ['mongoId1', 'mongoId2', ...] }
-router.post('/:id/add-lr', async (req, res) => {
-  try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(404).json({ message: 'Bill not found (invalid ID)' });
-    }
-
-    const bill = await Bill.findById(req.params.id);
-    if (!bill) {
-      return res.status(404).json({ message: 'Bill not found' });
-    }
-
-    const { loading_slip_ids } = req.body;
-    if (!loading_slip_ids || !Array.isArray(loading_slip_ids) || loading_slip_ids.length === 0) {
-      return res.status(400).json({ message: 'loading_slip_ids array is required' });
-    }
-
-    // Filter to valid Mongo IDs not already on the bill
-    const existingIds = (bill.loading_slip_ids || []).map(id => String(id));
-    const newIds = loading_slip_ids
-      .filter(id => mongoose.Types.ObjectId.isValid(id))
-      .filter(id => !existingIds.includes(String(id)));
-
-    if (newIds.length === 0) {
-      return res.status(400).json({ message: 'All selected LRs are already linked to this bill.' });
-    }
-
-    // Guard: ensure none of the new LRs is already billed under a DIFFERENT bill
-    const alreadyBilled = await Bill.find({
-      _id: { $ne: bill._id },
-      $or: [
-        { loading_slip_ids: { $elemMatch: { $in: newIds } } },
-        { loading_slip_id: { $in: newIds } }
-      ]
-    }).select('bill_number');
-
-    if (alreadyBilled.length > 0) {
-      const nums = alreadyBilled.map(b => b.bill_number).join(', ');
-      return res.status(400).json({
-        message: `Some selected LRs are already billed under: ${nums}`
-      });
-    }
-
-    // Fetch the new LRs and compute additional freight
-    const newSlips = await LoadingSlip.find({ _id: { $in: newIds } })
-      .select('slip_number lr_number total_amount total_freight freight');
-
-    const additionalFreight = newSlips.reduce((sum, s) => {
-      return sum + (s.total_amount || s.total_freight || s.freight || 0);
-    }, 0);
-
-    // Append IDs and LR numbers
-    bill.loading_slip_ids = [...existingIds.map(id => new mongoose.Types.ObjectId(id)), ...newIds.map(id => new mongoose.Types.ObjectId(id))];
-    bill.linked_lr_numbers = [
-      ...(bill.linked_lr_numbers || []),
-      ...newSlips.map(s => s.slip_number || s.lr_number).filter(Boolean)
-    ];
-
-    // Add the additional freight to bill_amount
-    bill.bill_amount = (bill.bill_amount || 0) + additionalFreight;
-
-    await bill.save(); // triggers pre-save hook → recalculates GST and net_amount
-
-    // Mark the new LRs as billed
-    await LoadingSlip.updateMany(
-      { _id: { $in: newIds } },
-      { $set: { bill_number: bill.bill_number, bill_id: bill._id } }
-    );
-
-    await bill.populate('loading_slip_id');
-
-    const billObj = bill.toObject();
-    billObj.id = billObj._id.toString();
-
-    console.log(`✅ Added ${newIds.length} LR(s) to bill ${bill.bill_number}. New freight: ₹${bill.bill_amount}`);
-
-    res.json({
-      message: `Added ${newIds.length} LR(s) to bill ${bill.bill_number}`,
-      bill: billObj
-    });
-
-  } catch (error) {
-    console.error('Add LR to bill error:', error);
-    res.status(500).json({ message: 'Failed to add LR to bill', error: error.message });
-  }
-});
 
 // Update bill
+
 router.put('/:id', async (req, res) => {
   try {
     console.log(`🔄 Updating bill ${req.params.id}`);

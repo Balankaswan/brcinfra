@@ -198,12 +198,6 @@ class ApiService {
     return this.request(`/bills/${id}`, { method: 'DELETE' });
   }
 
-  async addLrToBill(billId: string, loading_slip_ids: string[]) {
-    return this.request<{bill: any}>(`/bills/${billId}/add-lr`, {
-      method: 'POST',
-      body: JSON.stringify({ loading_slip_ids }),
-    });
-  }
 
   async markBillAsReceived(id: string, data: {received_date: string, received_amount: number}) {
     return this.request<{bill: any}>(`/bills/${id}/received`, {
