@@ -686,8 +686,22 @@ const BillsComponent: React.FC<BillsListProps> = ({ showOnlyFullyReceived = fals
               .reduce((sum, e) => sum + e.amount, 0);
 
             const received = bankingReceived + cashbookReceived;
-            // Calculate net amount: freight - mamool - commission + detention + rto + extra - tds - penalties
-            const netAmount = bill.bill_amount - (bill.mamool || 0) - (bill.commission || 0) + (bill.detention || 0) + (bill.rto || 0) + (bill.extra || 0) - (bill.tds || 0) - (bill.penalties || 0);
+            // Gross invoice amount = freight + detention + extra + rto + GST (for forward charge)
+            // Use gross_invoice_amount if stored (new bills), else compute from parts
+            const isRCM = bill.gst_type === 'reverse_charge';
+            const storedGross = bill.gross_invoice_amount;
+            const computedGross = (bill.bill_amount || 0)
+              + (bill.detention || 0)
+              + (bill.extra || 0)
+              + (bill.rto || 0)
+              + (isRCM ? 0 : (bill.gst_amount || 0));  // RCM: GST not added to invoice
+            const grossInvoice = storedGross && storedGross > 0 ? storedGross : computedGross;
+
+            // Net payable = gross invoice - deductions
+            const netAmount = bill.net_amount && bill.net_amount > 0
+              ? bill.net_amount
+              : grossInvoice - (bill.mamool || 0) - (bill.commission || 0) - (bill.tds || 0) - (bill.penalties || 0) - (bill.party_commission_cut || 0);
+
             const balance = netAmount - received;
             const trips = linkedSlips.length || 1;
             
@@ -732,7 +746,13 @@ const BillsComponent: React.FC<BillsListProps> = ({ showOnlyFullyReceived = fals
                         )}
                       </div>
                       <div className="text-sm text-gray-600">
-                        Total Freight: <span className="font-medium">{formatCurrency(netAmount)}</span>
+                        Gross Invoice: <span className="font-medium">{formatCurrency(grossInvoice)}</span>
+                        {bill.gst_amount && bill.gst_amount > 0 && (
+                          <span className="ml-2 text-xs text-blue-600">
+                            (Freight {formatCurrency(bill.bill_amount || 0)} + GST {formatCurrency(bill.gst_amount)})
+                            {isRCM && <span className="text-orange-500 ml-1">[RCM]</span>}
+                          </span>
+                        )}
                         <span className="ml-4">Advances: {received > 0 ? formatCurrency(received) : '0'}</span>
                       </div>
                     </div>
@@ -822,8 +842,13 @@ const BillsComponent: React.FC<BillsListProps> = ({ showOnlyFullyReceived = fals
                               <div className="text-sm font-medium text-gray-900">{primarySlip!.supplier}</div>
                             </div>
                             <div className="text-right">
-                              <div className="text-xs text-gray-500">Bill Amount</div>
-                              <div className="text-lg font-bold text-blue-600">{formatCurrency(bill.bill_amount)}</div>
+                              <div className="text-xs text-gray-500">Gross Invoice</div>
+                              <div className="text-lg font-bold text-blue-600">{formatCurrency(grossInvoice)}</div>
+                              {bill.gst_amount && bill.gst_amount > 0 && (
+                                <div className="text-xs text-gray-400">
+                                  Freight: {formatCurrency(bill.bill_amount || 0)} + GST: {formatCurrency(bill.gst_amount)}
+                                </div>
+                              )}
                             </div>
                           </div>
                         </>
@@ -846,8 +871,13 @@ const BillsComponent: React.FC<BillsListProps> = ({ showOnlyFullyReceived = fals
                           </div>
                           <div className="mt-3 pt-3 border-t border-blue-200 flex justify-end">
                             <div className="text-right">
-                              <div className="text-xs text-gray-500">Total Bill Amount</div>
-                              <div className="text-lg font-bold text-blue-600">{formatCurrency(bill.bill_amount)}</div>
+                              <div className="text-xs text-gray-500">Gross Invoice</div>
+                              <div className="text-lg font-bold text-blue-600">{formatCurrency(grossInvoice)}</div>
+                              {bill.gst_amount && bill.gst_amount > 0 && (
+                                <div className="text-xs text-gray-400">
+                                  Freight: {formatCurrency(bill.bill_amount || 0)} + GST: {formatCurrency(bill.gst_amount)}
+                                </div>
+                              )}
                             </div>
                           </div>
                         </>

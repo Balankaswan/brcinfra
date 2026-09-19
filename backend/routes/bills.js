@@ -269,15 +269,17 @@ router.put('/:id', async (req, res) => {
     });
     console.log(`🗑️ Deleted existing commission entries for bill ${req.params.id}`);
 
-    const bill = await Bill.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      { new: true, runValidators: true }
-    ).populate('loading_slip_id');
-
+    // Use findById + save so the pre-save hook runs (computing GST totals)
+    const bill = await Bill.findById(req.params.id);
     if (!bill) {
       return res.status(404).json({ message: 'Bill not found' });
     }
+
+    // Apply all incoming fields onto the document
+    Object.assign(bill, req.body);
+    await bill.save();   // triggers pre-save hook → gross_invoice_amount, net_amount recalculated
+
+    await bill.populate('loading_slip_id');
 
     // Update linked LoadingSlips in MongoDB
     let updateLrIds = [];

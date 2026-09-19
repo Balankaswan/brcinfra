@@ -69,13 +69,14 @@ export const useApiSync = () => {
           const currentBills = store.bills;
 
           // SAFETY GUARD: If backend returns 0 bills but we have local data, preserve it
-          // This prevents data wipeout when MongoDB is newly initialized or has connection issues
+          // Also preserve if a bill was recently created (backend may still be cold-starting)
           if (fetchedBills.length === 0 && currentBills.length > 0) {
             console.log('[Sync] Backend returned 0 bills but local has', currentBills.length, '— preserving local state');
             // Still skip the setBills call - keep what we have
           } else {
             const recentBillCreation = localStorage.getItem('lastBillCreation');
-            const isRecentCreation = recentBillCreation && (Date.now() - parseInt(recentBillCreation)) < 15000;
+            // 60s guard: Render can cold-start in up to 45s; keep local items safe
+            const isRecentCreation = recentBillCreation && (Date.now() - parseInt(recentBillCreation)) < 60000;
 
             // Primary source: fetchedBills from backend MongoDB
             const billMap = new Map<string, any>();
@@ -143,7 +144,8 @@ export const useApiSync = () => {
             console.log('[Sync] Backend returned 0 memos but local has', currentMemos.length, '— preserving local state');
           } else {
             const recentMemoCreation = localStorage.getItem('lastMemoCreation');
-            const isRecentCreation = recentMemoCreation && (Date.now() - parseInt(recentMemoCreation)) < 15000;
+            // 60s guard: Render can cold-start in up to 45s; keep local items safe
+            const isRecentCreation = recentMemoCreation && (Date.now() - parseInt(recentMemoCreation)) < 60000;
 
             const memoMap = new Map<string, any>();
             const seenNumbers = new Set<string>();
@@ -208,7 +210,8 @@ export const useApiSync = () => {
             console.log('[Sync] Backend returned 0 LRs but local has', currentSlips.length, '— preserving local state');
           } else {
             const recentSlipCreation = localStorage.getItem('lastLoadingSlipCreation');
-            const isRecentSlipCreation = recentSlipCreation && (Date.now() - parseInt(recentSlipCreation)) < 5000;
+            // 30s guard for LRs
+            const isRecentSlipCreation = recentSlipCreation && (Date.now() - parseInt(recentSlipCreation)) < 30000;
 
             const slipMap = new Map<string, any>();
             const seenNumbers = new Set<string>();
@@ -460,6 +463,14 @@ export const useApiSync = () => {
         eventSourceRef.current = null;
       }
     };
+  }, []);
+
+  // Periodic sync every 5 minutes to keep data fresh when SSE misses an event
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      window.dispatchEvent(new CustomEvent('data-sync-required'));
+    }, 5 * 60 * 1000); // 5 minutes
+    return () => clearInterval(intervalId);
   }, []);
 
   // Return functions to sync data after mutations
