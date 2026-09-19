@@ -2,6 +2,53 @@ import React, { createContext, useContext, useState, useMemo } from 'react';
 import { apiService } from './api';
 import type { Bill, LoadingSlip, Memo, Party, Supplier, Vehicle, BankingEntry, CashbookEntry, LedgerEntry, PODFile, FuelWallet, FuelTransaction, VehicleFuelExpense } from '../types';
 
+// Helper functions for tracking deleted items to prevent race conditions during sync
+export const addDeletedBillId = (idOrNumber: string) => {
+  if (!idOrNumber) return;
+  try {
+    const key = 'brc_deleted_bills';
+    const raw = localStorage.getItem(key);
+    const set = new Set<string>(raw ? JSON.parse(raw) : []);
+    set.add(String(idOrNumber).trim().toUpperCase());
+    localStorage.setItem(key, JSON.stringify(Array.from(set)));
+  } catch (e) {}
+};
+
+export const removeDeletedBillId = (idOrNumber: string) => {
+  if (!idOrNumber) return;
+  try {
+    const key = 'brc_deleted_bills';
+    const raw = localStorage.getItem(key);
+    if (!raw) return;
+    const set = new Set<string>(JSON.parse(raw));
+    set.delete(String(idOrNumber).trim().toUpperCase());
+    localStorage.setItem(key, JSON.stringify(Array.from(set)));
+  } catch (e) {}
+};
+
+export const addDeletedMemoId = (idOrNumber: string) => {
+  if (!idOrNumber) return;
+  try {
+    const key = 'brc_deleted_memos';
+    const raw = localStorage.getItem(key);
+    const set = new Set<string>(raw ? JSON.parse(raw) : []);
+    set.add(String(idOrNumber).trim().toUpperCase());
+    localStorage.setItem(key, JSON.stringify(Array.from(set)));
+  } catch (e) {}
+};
+
+export const removeDeletedMemoId = (idOrNumber: string) => {
+  if (!idOrNumber) return;
+  try {
+    const key = 'brc_deleted_memos';
+    const raw = localStorage.getItem(key);
+    if (!raw) return;
+    const set = new Set<string>(JSON.parse(raw));
+    set.delete(String(idOrNumber).trim().toUpperCase());
+    localStorage.setItem(key, JSON.stringify(Array.from(set)));
+  } catch (e) {}
+};
+
 interface DataStoreState {
   loadingSlips: LoadingSlip[];
   memos: Memo[];
@@ -161,6 +208,9 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     // Memo actions
     addMemo: (memo) => {
       try { localStorage.setItem('lastMemoCreation', Date.now().toString()); } catch (e) {}
+      if (memo.memo_number) removeDeletedMemoId(memo.memo_number);
+      if (memo.id) removeDeletedMemoId(memo.id);
+      if ((memo as any)._id) removeDeletedMemoId((memo as any)._id);
       setMemos(prev => [
         memo,
         ...prev.filter(m => m.id !== memo.id && (m as any)._id !== (memo as any)._id && m.memo_number !== memo.memo_number)
@@ -198,6 +248,10 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       const memoNoToDelete = memoToDelete?.memo_number || id;
       const linkedIds = memoToDelete?.loading_slip_ids || (memoToDelete?.loading_slip_id ? [typeof memoToDelete.loading_slip_id === 'object' ? (memoToDelete.loading_slip_id as any)._id || (memoToDelete.loading_slip_id as any).id : memoToDelete.loading_slip_id] : []);
 
+      if (id) addDeletedMemoId(id);
+      if ((memoToDelete as any)?._id) addDeletedMemoId((memoToDelete as any)._id);
+      if (memoNoToDelete) addDeletedMemoId(memoNoToDelete);
+
       setMemos(prev => prev.filter(m => {
         const matchesId = m.id === id || (m as any)._id === id;
         const matchesNo = memoNoToDelete && m.memo_number === memoNoToDelete;
@@ -214,7 +268,6 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           return s;
         }));
       }
-      setTimeout(() => window.dispatchEvent(new CustomEvent('data-sync-required')), 100);
     },
     markMemoAsPaid: (id, paidDate, paidAmount) => {
       setMemos(prev => prev.map(m =>
@@ -226,15 +279,41 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     // Bill actions
     addBill: (bill) => {
       try { localStorage.setItem('lastBillCreation', Date.now().toString()); } catch (e) {}
+      if (bill.bill_number) removeDeletedBillId(bill.bill_number);
+      if (bill.id) removeDeletedBillId(bill.id);
+      if ((bill as any)._id) removeDeletedBillId((bill as any)._id);
       setBills(prev => [
         bill,
         ...prev.filter(b => b.id !== bill.id && (b as any)._id !== (bill as any)._id && b.bill_number !== bill.bill_number)
       ]);
     },
-    updateBill: (bill) => setBills(prev => prev.map(b => (b.id === bill.id || (b as any)._id === (bill as any)._id || b.bill_number === bill.bill_number) ? bill : b)),
+    updateBill: (bill) => {
+      setBills(prev => prev.map(b => (b.id === bill.id || (b as any)._id === (bill as any)._id || b.bill_number === bill.bill_number) ? bill : b));
+      
+      const newLinkedIds = (bill.loading_slip_ids && bill.loading_slip_ids.length > 0)
+        ? bill.loading_slip_ids
+        : (bill.loading_slip_id ? [typeof bill.loading_slip_id === 'object' ? (bill.loading_slip_id as any)._id || (bill.loading_slip_id as any).id : bill.loading_slip_id] : []);
+
+      setLoadingSlips(prev => prev.map(s => {
+        const sId = s.id || (s as any)._id;
+        const isCurrentlyLinkedToThisBill = s.bill_number === bill.bill_number || s.bill_id === bill.id || s.bill_id === (bill as any)._id;
+        const isNewLinked = sId && newLinkedIds.includes(sId);
+
+        if (isNewLinked) {
+          return { ...s, bill_number: bill.bill_number, bill_id: bill.id || (bill as any)._id };
+        } else if (isCurrentlyLinkedToThisBill) {
+          return { ...s, bill_number: undefined, bill_id: undefined };
+        }
+        return s;
+      }));
+    },
     deleteBill: (id) => {
       const billToDelete = bills.find(b => b.id === id || (b as any)._id === id || b.bill_number === id);
       const billNoToDelete = billToDelete?.bill_number || id;
+
+      if (id) addDeletedBillId(id);
+      if ((billToDelete as any)?._id) addDeletedBillId((billToDelete as any)._id);
+      if (billNoToDelete) addDeletedBillId(billNoToDelete);
 
       setBills(prev => prev.filter(b => {
         const matchesId = b.id === id || (b as any)._id === id;
@@ -252,7 +331,6 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           return s;
         }));
       }
-      setTimeout(() => window.dispatchEvent(new CustomEvent('data-sync-required')), 100);
     },
     markBillAsReceived: (id, receivedDate, receivedAmount) => {
       setBills(prev => prev.map(b =>

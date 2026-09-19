@@ -57,88 +57,153 @@ export const useApiSync = () => {
           apiService.getFuelTransactions()
         ]);
 
-        // Clear legacy blacklists from localStorage if present
-        try {
-          localStorage.removeItem('brc_deleted_bills');
-          localStorage.removeItem('brc_deleted_memos');
-        } catch (e) {}
+        const getDeletedBills = (): Set<string> => {
+          try {
+            const raw = localStorage.getItem('brc_deleted_bills');
+            return new Set<string>(raw ? JSON.parse(raw) : []);
+          } catch { return new Set(); }
+        };
 
-        // ── BULLETPROOF BILLS SYNC ──
-        // Strategy: LOCAL is the floor — never drop anything saved locally.
-        // Backend updates existing items (by ID/number) and adds new ones.
-        // Items are only removed when the user explicitly deletes them.
+        const getDeletedMemos = (): Set<string> => {
+          try {
+            const raw = localStorage.getItem('brc_deleted_memos');
+            return new Set<string>(raw ? JSON.parse(raw) : []);
+          } catch { return new Set(); }
+        };
+
+        const deletedBills = getDeletedBills();
+        const deletedMemos = getDeletedMemos();
+
+        // ── BILLS SYNC ──
         if (billsResponse.status === 'fulfilled') {
-          const fetchedBills = billsResponse.value.bills || [];
-          const currentBills = store.bills;
-
-          // Build a map starting from ALL current local bills
-          // Key: canonical bill_number (upper). Value: best version of the bill.
-          const mergedBillMap = new Map<string, any>();
-
-          // Step 1 — seed with every local bill (they are the floor)
-          currentBills.forEach(bill => {
-            const billNo = bill.bill_number ? bill.bill_number.trim().toUpperCase() : null;
-            const id = bill.id || (bill as any)._id;
-            if (billNo) mergedBillMap.set(billNo, { ...bill, id: id || billNo });
-            else if (id) mergedBillMap.set(String(id), bill);
+          const rawFetchedBills = billsResponse.value.bills || [];
+          const fetchedBills = rawFetchedBills.filter((b: any) => {
+            const id = b.id ? String(b.id).trim().toUpperCase() : null;
+            const mongoId = b._id ? String(b._id).trim().toUpperCase() : null;
+            const billNo = b.bill_number ? String(b.bill_number).trim().toUpperCase() : null;
+            if (id && deletedBills.has(id)) return false;
+            if (mongoId && deletedBills.has(mongoId)) return false;
+            if (billNo && deletedBills.has(billNo)) return false;
+            return true;
+          });
+          const currentBills = store.bills.filter(b => {
+            const id = b.id ? String(b.id).trim().toUpperCase() : null;
+            const mongoId = (b as any)._id ? String((b as any)._id).trim().toUpperCase() : null;
+            const billNo = b.bill_number ? String(b.bill_number).trim().toUpperCase() : null;
+            if (id && deletedBills.has(id)) return false;
+            if (mongoId && deletedBills.has(mongoId)) return false;
+            if (billNo && deletedBills.has(billNo)) return false;
+            return true;
           });
 
-          // Step 2 — upsert from backend: if backend has a newer/confirmed version, use it
-          fetchedBills.forEach(fetched => {
-            const billNo = fetched.bill_number ? fetched.bill_number.trim().toUpperCase() : null;
-            const id = fetched.id || (fetched as any)._id;
-            const normalized = { ...fetched, id: id || billNo };
-            if (billNo) mergedBillMap.set(billNo, normalized); // backend wins for same bill_number
-            else if (id) mergedBillMap.set(String(id), normalized);
-          });
+          if (fetchedBills.length === 0 && currentBills.length > 0) {
+            console.log('[Sync] Backend returned 0 bills, preserving local state');
+          } else {
+            const recentBillCreation = localStorage.getItem('lastBillCreation');
+            const isRecentCreation = recentBillCreation && (Date.now() - parseInt(recentBillCreation)) < 30000;
 
-          const completeBills = Array.from(mergedBillMap.values()).sort((a, b) => {
-            const dateA = new Date(a.created_at || a.date || 0).getTime();
-            const dateB = new Date(b.created_at || b.date || 0).getTime();
-            return dateB - dateA;
-          });
+            const backendBillMap = new Map<string, any>();
+            fetchedBills.forEach((bill: any) => {
+              const id = bill.id || (bill as any)._id;
+              const billNo = bill.bill_number ? bill.bill_number.trim().toUpperCase() : null;
+              const normalized = { ...bill, id: id || billNo };
+              if (billNo) backendBillMap.set(billNo, normalized);
+              if (id) backendBillMap.set(String(id), normalized);
+            });
 
-          // Only call setBills if the result is non-empty OR we have no local data
-          if (completeBills.length > 0 || currentBills.length === 0) {
+            let completeBills = Array.from(
+              new Map(fetchedBills.map((b: any) => {
+                const key = b.bill_number ? b.bill_number.trim().toUpperCase() : (b.id || (b as any)._id);
+                return [key, { ...b, id: b.id || (b as any)._id || b.bill_number }];
+              })).values()
+            );
+
+            if (isRecentCreation) {
+              currentBills.forEach(bill => {
+                const billNo = bill.bill_number ? bill.bill_number.trim().toUpperCase() : null;
+                const id = bill.id || (bill as any)._id;
+                const inBackend = (billNo && backendBillMap.has(billNo)) || (id && backendBillMap.has(String(id)));
+                if (!inBackend) {
+                  completeBills.push(bill);
+                }
+              });
+            }
+
+            completeBills.sort((a, b) => {
+              const dateA = new Date(a.created_at || a.date || 0).getTime();
+              const dateB = new Date(b.created_at || b.date || 0).getTime();
+              return dateB - dateA;
+            });
+
             store.setBills(completeBills);
           }
         }
 
-        // ── BULLETPROOF MEMOS SYNC ──
-        // Same union strategy as bills above.
+
+        // ── MEMOS SYNC ──
         if (memosResponse.status === 'fulfilled') {
-          const fetchedMemos = memosResponse.value.memos || [];
-          const currentMemos = store.memos;
-
-          const mergedMemoMap = new Map<string, any>();
-
-          // Step 1 — seed with all local memos
-          currentMemos.forEach(memo => {
-            const memoNo = memo.memo_number ? memo.memo_number.trim().toUpperCase() : null;
-            const id = memo.id || (memo as any)._id;
-            if (memoNo) mergedMemoMap.set(memoNo, { ...memo, id: id || memoNo });
-            else if (id) mergedMemoMap.set(String(id), memo);
+          const rawFetchedMemos = memosResponse.value.memos || [];
+          const fetchedMemos = rawFetchedMemos.filter((m: any) => {
+            const id = m.id ? String(m.id).trim().toUpperCase() : null;
+            const mongoId = m._id ? String(m._id).trim().toUpperCase() : null;
+            const memoNo = m.memo_number ? String(m.memo_number).trim().toUpperCase() : null;
+            if (id && deletedMemos.has(id)) return false;
+            if (mongoId && deletedMemos.has(mongoId)) return false;
+            if (memoNo && deletedMemos.has(memoNo)) return false;
+            return true;
+          });
+          const currentMemos = store.memos.filter(m => {
+            const id = m.id ? String(m.id).trim().toUpperCase() : null;
+            const mongoId = (m as any)._id ? String((m as any)._id).trim().toUpperCase() : null;
+            const memoNo = m.memo_number ? String(m.memo_number).trim().toUpperCase() : null;
+            if (id && deletedMemos.has(id)) return false;
+            if (mongoId && deletedMemos.has(mongoId)) return false;
+            if (memoNo && deletedMemos.has(memoNo)) return false;
+            return true;
           });
 
-          // Step 2 — upsert from backend
-          fetchedMemos.forEach(fetched => {
-            const memoNo = fetched.memo_number ? fetched.memo_number.trim().toUpperCase() : null;
-            const id = fetched.id || (fetched as any)._id;
-            const normalized = { ...fetched, id: id || memoNo };
-            if (memoNo) mergedMemoMap.set(memoNo, normalized);
-            else if (id) mergedMemoMap.set(String(id), normalized);
-          });
+          if (fetchedMemos.length === 0 && currentMemos.length > 0) {
+            console.log('[Sync] Backend returned 0 memos, preserving local state');
+          } else {
+            const recentMemoCreation = localStorage.getItem('lastMemoCreation');
+            const isRecentCreation = recentMemoCreation && (Date.now() - parseInt(recentMemoCreation)) < 30000;
 
-          const completeMemos = Array.from(mergedMemoMap.values()).sort((a, b) => {
-            const dateA = new Date(a.created_at || a.date || 0).getTime();
-            const dateB = new Date(b.created_at || b.date || 0).getTime();
-            return dateB - dateA;
-          });
+            const backendMemoMap = new Map<string, any>();
+            fetchedMemos.forEach((memo: any) => {
+              const id = memo.id || (memo as any)._id;
+              const memoNo = memo.memo_number ? memo.memo_number.trim().toUpperCase() : null;
+              if (memoNo) backendMemoMap.set(memoNo, memo);
+              if (id) backendMemoMap.set(String(id), memo);
+            });
 
-          if (completeMemos.length > 0 || currentMemos.length === 0) {
+            let completeMemos = Array.from(
+              new Map(fetchedMemos.map((m: any) => {
+                const key = m.memo_number ? m.memo_number.trim().toUpperCase() : (m.id || (m as any)._id);
+                return [key, { ...m, id: m.id || (m as any)._id || m.memo_number }];
+              })).values()
+            );
+
+            if (isRecentCreation) {
+              currentMemos.forEach(memo => {
+                const memoNo = memo.memo_number ? memo.memo_number.trim().toUpperCase() : null;
+                const id = memo.id || (memo as any)._id;
+                const inBackend = (memoNo && backendMemoMap.has(memoNo)) || (id && backendMemoMap.has(String(id)));
+                if (!inBackend) {
+                  completeMemos.push(memo);
+                }
+              });
+            }
+
+            completeMemos.sort((a, b) => {
+              const dateA = new Date(a.created_at || a.date || 0).getTime();
+              const dateB = new Date(b.created_at || b.date || 0).getTime();
+              return dateB - dateA;
+            });
+
             store.setMemos(completeMemos);
           }
         }
+
 
         // BULLETPROOF LOADING SLIPS IMPORT AND SYNC
         if (loadingSlipsResponse.status === 'fulfilled') {
@@ -529,37 +594,32 @@ export const useApiSync = () => {
         case 'bill':
           await apiService.deleteBill(id);
           store.deleteBill(id);
-          window.dispatchEvent(new CustomEvent('data-sync-required'));
+          // Do NOT dispatch data-sync-required here — the union merge would re-add
+          // the deleted bill from local state before backend confirms deletion.
           break;
         case 'memo':
           await apiService.deleteMemo(id);
           store.deleteMemo(id);
-          window.dispatchEvent(new CustomEvent('data-sync-required'));
           break;
         case 'loadingSlip':
           await apiService.deleteLoadingSlip(id);
           store.deleteLoadingSlip(id);
-          window.dispatchEvent(new CustomEvent('data-sync-required'));
           break;
         case 'party':
           await apiService.deleteParty(id);
           store.deleteParty(id);
-          window.dispatchEvent(new CustomEvent('data-sync-required'));
           break;
         case 'supplier':
           await apiService.deleteSupplier(id);
           store.deleteSupplier(id);
-          window.dispatchEvent(new CustomEvent('data-sync-required'));
           break;
         case 'vehicle':
           await apiService.deleteVehicle(id);
           store.deleteVehicle(id);
-          window.dispatchEvent(new CustomEvent('data-sync-required'));
           break;
         case 'bankingEntry':
           await apiService.deleteBankingEntry(id);
           store.deleteBankingEntry(id);
-          window.dispatchEvent(new CustomEvent('data-sync-required'));
           break;
         default:
           console.warn('Unknown sync type:', type);
@@ -573,6 +633,7 @@ export const useApiSync = () => {
       throw error;
     }
   };
+
 
   const retrySync = async () => {
     try {

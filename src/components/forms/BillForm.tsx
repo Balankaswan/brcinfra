@@ -45,13 +45,74 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
   const [podFileName, setPodFileName] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const activeSlips = useMemo(() => {
-    if (selectedSlips && selectedSlips.length > 0) return selectedSlips;
-    if (loadingSlip) return [loadingSlip];
+  const [selectedLrIds, setSelectedLrIds] = useState<string[]>(() => {
+    if (selectedSlips && selectedSlips.length > 0) {
+      return selectedSlips.map(s => String(s.id || (s as any)._id));
+    }
+    if (loadingSlip) {
+      return [String(loadingSlip.id || (loadingSlip as any)._id)];
+    }
+    if (initialData) {
+      const ids = initialData.loading_slip_ids && initialData.loading_slip_ids.length > 0
+        ? initialData.loading_slip_ids
+        : (initialData.loading_slip_id ? [typeof initialData.loading_slip_id === 'object' ? (initialData.loading_slip_id as any)._id || (initialData.loading_slip_id as any).id : initialData.loading_slip_id] : []);
+      return ids.map(id => String(id));
+    }
     return [];
-  }, [selectedSlips, loadingSlip]);
+  });
+  const [showLrManager, setShowLrManager] = useState(false);
+
+  const activeSlips = useMemo(() => {
+    if (!allSlips) return [];
+    return allSlips.filter(s => {
+      const id = String(s.id || (s as any)._id);
+      return selectedLrIds.includes(id);
+    });
+  }, [allSlips, selectedLrIds]);
 
   const primarySlip = activeSlips[0];
+
+  const eligibleLrsForParty = useMemo(() => {
+    if (!allSlips) return [];
+    const partyName = (formData?.party || '').trim().toLowerCase();
+    return allSlips.filter(s => {
+      const id = String(s.id || (s as any)._id);
+      const isAlreadySelected = selectedLrIds.includes(id);
+      const sParty = (s.consignor_name || s.party || '').trim().toLowerCase();
+      const matchesParty = !partyName || sParty === partyName;
+      const isUnbilled = !s.bill_number || s.bill_number === formData?.bill_number;
+      return isAlreadySelected || (matchesParty && isUnbilled);
+    });
+  }, [allSlips, formData?.party, formData?.bill_number, selectedLrIds]);
+
+  const handleToggleLrSelection = (lrId: string) => {
+    const nextSelected = selectedLrIds.includes(lrId)
+      ? selectedLrIds.filter(id => id !== lrId)
+      : [...selectedLrIds, lrId];
+
+    setSelectedLrIds(nextSelected);
+
+    const newActiveSlips = (allSlips || []).filter(s => {
+      const sId = String(s.id || (s as any)._id);
+      return nextSelected.includes(sId);
+    });
+
+    const newFreight = newActiveSlips.reduce((sum, s) => sum + (s.total_amount || s.total_freight || s.freight || 0), 0);
+    const newDetention = newActiveSlips.reduce((sum, s) => sum + (s.demurrage_charge || 0), 0);
+    const newRto = newActiveSlips.reduce((sum, s) => sum + (s.rto || 0), 0);
+    const newVehicles = Array.from(new Set(newActiveSlips.map(s => s.vehicle_no).filter(Boolean))).join(', ');
+
+    setFormData(prev => ({
+      ...prev,
+      loading_slip_id: newActiveSlips[0]?.id || '',
+      loading_slip_ids: nextSelected,
+      linked_lr_numbers: newActiveSlips.map(s => s.lr_number || s.slip_number),
+      bill_amount: newFreight,
+      detention: newDetention,
+      rto: newRto,
+      vehicle_no: newVehicles || prev.vehicle_no,
+    }));
+  };
 
   // Build party master lookup
   const knownParties = useMemo(() => {
@@ -476,10 +537,77 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
           </div>
 
           {/* ── Section 3: LR/GR Details (per linked LR) ── */}
-          {activeSlips.length > 0 && (
-            <div className="border border-gray-200 rounded-lg overflow-hidden">
-              <SectionHeader title={`LR / GR Details  (${activeSlips.length} Bilty${activeSlips.length > 1 ? 's' : ''})`} />
-              <div className="px-4 pb-4 space-y-4">
+          <div className="border border-gray-200 rounded-lg overflow-hidden">
+            <SectionHeader title={`LR / GR Details (${activeSlips.length} Selected)`}>
+              <button
+                type="button"
+                onClick={() => setShowLrManager(!showLrManager)}
+                className="text-xs bg-blue-600 hover:bg-blue-700 text-white font-semibold px-3 py-1 rounded transition-colors flex items-center gap-1"
+              >
+                {showLrManager ? 'Hide LR Selector' : `+ Add / Manage LRs (${eligibleLrsForParty.length} Available)`}
+              </button>
+            </SectionHeader>
+
+            {/* LR Selector Accordion */}
+            {showLrManager && (
+              <div className="p-4 bg-blue-50/80 border-b border-blue-200 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-blue-900 uppercase tracking-wide">
+                    Select LRs for {formData.party || 'Party'} (Check/Uncheck to add or remove LRs from this Bill):
+                  </span>
+                  <span className="text-xs text-blue-800 font-semibold bg-blue-100 px-2.5 py-0.5 rounded-full">
+                    Selected: {selectedLrIds.length} LR(s)
+                  </span>
+                </div>
+                {eligibleLrsForParty.length === 0 ? (
+                  <div className="text-xs text-gray-500 py-3 text-center bg-white rounded border border-blue-100">
+                    No available LRs found for {formData.party || 'this party'}.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-60 overflow-y-auto pr-1">
+                    {eligibleLrsForParty.map(lr => {
+                      const lrId = String(lr.id || (lr as any)._id);
+                      const isChecked = selectedLrIds.includes(lrId);
+                      return (
+                        <div
+                          key={lrId}
+                          onClick={() => handleToggleLrSelection(lrId)}
+                          className={`p-2.5 rounded-lg border cursor-pointer transition-all text-xs flex items-start gap-2.5 ${
+                            isChecked
+                              ? 'bg-white border-blue-500 ring-1 ring-blue-500 shadow-sm'
+                              : 'bg-white/80 border-gray-200 hover:border-blue-300'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {}}
+                            className="mt-0.5 text-blue-600 rounded cursor-pointer"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between font-bold text-blue-800">
+                              <span>LR: {lr.lr_number || lr.slip_number}</span>
+                              <span className="font-semibold text-gray-900">
+                                {formatCurrency(lr.total_amount || lr.total_freight || lr.freight || 0)}
+                              </span>
+                            </div>
+                            <div className="text-gray-500 mt-0.5 truncate">
+                              {lr.date ? new Date(lr.date).toLocaleDateString('en-IN') : ''} | Truck: {lr.vehicle_no || 'N/A'}
+                            </div>
+                            <div className="text-gray-600 truncate">
+                              {lr.from_location} → {lr.to_location}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {activeSlips.length > 0 ? (
+              <div className="px-4 pb-4 pt-3 space-y-4">
                 {activeSlips.map((s, idx) => (
                   <div key={s.id || idx} className="bg-blue-50 border border-blue-100 rounded-lg p-3 space-y-3">
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -547,8 +675,12 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
                   </div>
                 ))}
               </div>
-            </div>
-          )}
+            ) : (
+              <div className="p-6 text-center text-sm text-gray-500 bg-gray-50">
+                No LRs linked to this bill yet. Click "+ Add / Manage LRs" above to select LRs for {formData.party || 'this party'}.
+              </div>
+            )}
+          </div>
 
           {/* ── Section 4: Freight & Charges ── */}
           <div className="border border-gray-200 rounded-lg overflow-hidden">
