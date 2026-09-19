@@ -63,139 +63,79 @@ export const useApiSync = () => {
           localStorage.removeItem('brc_deleted_memos');
         } catch (e) {}
 
-        // BULLETPROOF BILLS IMPORT AND SYNC
+        // ── BULLETPROOF BILLS SYNC ──
+        // Strategy: LOCAL is the floor — never drop anything saved locally.
+        // Backend updates existing items (by ID/number) and adds new ones.
+        // Items are only removed when the user explicitly deletes them.
         if (billsResponse.status === 'fulfilled') {
           const fetchedBills = billsResponse.value.bills || [];
           const currentBills = store.bills;
 
-          // SAFETY GUARD: If backend returns 0 bills but we have local data, preserve it
-          // Also preserve if a bill was recently created (backend may still be cold-starting)
-          if (fetchedBills.length === 0 && currentBills.length > 0) {
-            console.log('[Sync] Backend returned 0 bills but local has', currentBills.length, '— preserving local state');
-            // Still skip the setBills call - keep what we have
-          } else {
-            const recentBillCreation = localStorage.getItem('lastBillCreation');
-            // 60s guard: Render can cold-start in up to 45s; keep local items safe
-            const isRecentCreation = recentBillCreation && (Date.now() - parseInt(recentBillCreation)) < 60000;
+          // Build a map starting from ALL current local bills
+          // Key: canonical bill_number (upper). Value: best version of the bill.
+          const mergedBillMap = new Map<string, any>();
 
-            // Primary source: fetchedBills from backend MongoDB
-            const billMap = new Map<string, any>();
-            const seenNumbers = new Set<string>();
+          // Step 1 — seed with every local bill (they are the floor)
+          currentBills.forEach(bill => {
+            const billNo = bill.bill_number ? bill.bill_number.trim().toUpperCase() : null;
+            const id = bill.id || (bill as any)._id;
+            if (billNo) mergedBillMap.set(billNo, { ...bill, id: id || billNo });
+            else if (id) mergedBillMap.set(String(id), bill);
+          });
 
-            fetchedBills.forEach(fetchedBill => {
-              const id = fetchedBill.id || (fetchedBill as any)._id;
-              const billNo = fetchedBill.bill_number;
-              const normalized = {
-                ...fetchedBill,
-                id: id || (fetchedBill as any)._id || billNo
-              };
-              if (id) billMap.set(String(id), normalized);
-              if ((fetchedBill as any)._id) billMap.set(String((fetchedBill as any)._id), normalized);
-              if (billNo) {
-                billMap.set(`num:${billNo.trim().toUpperCase()}`, normalized);
-                seenNumbers.add(billNo.trim().toUpperCase());
-              }
-            });
+          // Step 2 — upsert from backend: if backend has a newer/confirmed version, use it
+          fetchedBills.forEach(fetched => {
+            const billNo = fetched.bill_number ? fetched.bill_number.trim().toUpperCase() : null;
+            const id = fetched.id || (fetched as any)._id;
+            const normalized = { ...fetched, id: id || billNo };
+            if (billNo) mergedBillMap.set(billNo, normalized); // backend wins for same bill_number
+            else if (id) mergedBillMap.set(String(id), normalized);
+          });
 
-            // Preserve local transient drafts if created recently or not yet in backend
-            currentBills.forEach(bill => {
-              const id = bill.id || (bill as any)._id;
-              const billNo = bill.bill_number ? bill.bill_number.trim().toUpperCase() : '';
+          const completeBills = Array.from(mergedBillMap.values()).sort((a, b) => {
+            const dateA = new Date(a.created_at || a.date || 0).getTime();
+            const dateB = new Date(b.created_at || b.date || 0).getTime();
+            return dateB - dateA;
+          });
 
-              const isAlreadyInBackend = (id && billMap.has(String(id))) || (billNo && seenNumbers.has(billNo));
-              const isMongoId = id && String(id).match(/^[0-9a-fA-F]{24}$/);
-
-              // Keep local item if it's recently created OR a non-MongoId draft not yet in backend
-              if (!isAlreadyInBackend && (isRecentCreation || !isMongoId)) {
-                if (billNo) {
-                  billMap.set(`num:${billNo}`, bill);
-                  seenNumbers.add(billNo);
-                } else if (id) {
-                  billMap.set(String(id), bill);
-                }
-              }
-            });
-
-            const uniqueBillsMap = new Map<string, any>();
-            billMap.forEach((bill) => {
-              const key = bill.id || (bill as any)._id || bill.bill_number;
-              if (key && !uniqueBillsMap.has(String(key))) {
-                uniqueBillsMap.set(String(key), bill);
-              }
-            });
-
-            const completeBills = Array.from(uniqueBillsMap.values()).sort((a, b) => {
-              const dateA = new Date(a.created_at || a.date || 0).getTime();
-              const dateB = new Date(b.created_at || b.date || 0).getTime();
-              return dateB - dateA;
-            });
-
+          // Only call setBills if the result is non-empty OR we have no local data
+          if (completeBills.length > 0 || currentBills.length === 0) {
             store.setBills(completeBills);
           }
         }
 
-        // BULLETPROOF MEMOS IMPORT AND SYNC
+        // ── BULLETPROOF MEMOS SYNC ──
+        // Same union strategy as bills above.
         if (memosResponse.status === 'fulfilled') {
           const fetchedMemos = memosResponse.value.memos || [];
           const currentMemos = store.memos;
 
-          // SAFETY GUARD: If backend returns 0 memos but we have local data, preserve it
-          if (fetchedMemos.length === 0 && currentMemos.length > 0) {
-            console.log('[Sync] Backend returned 0 memos but local has', currentMemos.length, '— preserving local state');
-          } else {
-            const recentMemoCreation = localStorage.getItem('lastMemoCreation');
-            // 60s guard: Render can cold-start in up to 45s; keep local items safe
-            const isRecentCreation = recentMemoCreation && (Date.now() - parseInt(recentMemoCreation)) < 60000;
+          const mergedMemoMap = new Map<string, any>();
 
-            const memoMap = new Map<string, any>();
-            const seenNumbers = new Set<string>();
+          // Step 1 — seed with all local memos
+          currentMemos.forEach(memo => {
+            const memoNo = memo.memo_number ? memo.memo_number.trim().toUpperCase() : null;
+            const id = memo.id || (memo as any)._id;
+            if (memoNo) mergedMemoMap.set(memoNo, { ...memo, id: id || memoNo });
+            else if (id) mergedMemoMap.set(String(id), memo);
+          });
 
-            fetchedMemos.forEach(fetchedMemo => {
-              const id = fetchedMemo.id || (fetchedMemo as any)._id;
-              const memoNo = fetchedMemo.memo_number;
-              const normalized = {
-                ...fetchedMemo,
-                id: id || (fetchedMemo as any)._id || memoNo
-              };
-              if (id) memoMap.set(String(id), normalized);
-              if ((fetchedMemo as any)._id) memoMap.set(String((fetchedMemo as any)._id), normalized);
-              if (memoNo) {
-                memoMap.set(`num:${memoNo.trim().toUpperCase()}`, normalized);
-                seenNumbers.add(memoNo.trim().toUpperCase());
-              }
-            });
+          // Step 2 — upsert from backend
+          fetchedMemos.forEach(fetched => {
+            const memoNo = fetched.memo_number ? fetched.memo_number.trim().toUpperCase() : null;
+            const id = fetched.id || (fetched as any)._id;
+            const normalized = { ...fetched, id: id || memoNo };
+            if (memoNo) mergedMemoMap.set(memoNo, normalized);
+            else if (id) mergedMemoMap.set(String(id), normalized);
+          });
 
-            currentMemos.forEach(memo => {
-              const id = memo.id || (memo as any)._id;
-              const memoNo = memo.memo_number ? memo.memo_number.trim().toUpperCase() : '';
+          const completeMemos = Array.from(mergedMemoMap.values()).sort((a, b) => {
+            const dateA = new Date(a.created_at || a.date || 0).getTime();
+            const dateB = new Date(b.created_at || b.date || 0).getTime();
+            return dateB - dateA;
+          });
 
-              const isAlreadyInBackend = (id && memoMap.has(String(id))) || (memoNo && seenNumbers.has(memoNo));
-              const isMongoId = id && String(id).match(/^[0-9a-fA-F]{24}$/);
-
-              if (!isAlreadyInBackend && (isRecentCreation || !isMongoId)) {
-                if (memoNo) {
-                  memoMap.set(`num:${memoNo}`, memo);
-                  seenNumbers.add(memoNo);
-                } else if (id) {
-                  memoMap.set(String(id), memo);
-                }
-              }
-            });
-
-            const uniqueMemosMap = new Map<string, any>();
-            memoMap.forEach((memo) => {
-              const key = memo.id || (memo as any)._id || memo.memo_number;
-              if (key && !uniqueMemosMap.has(String(key))) {
-                uniqueMemosMap.set(String(key), memo);
-              }
-            });
-
-            const completeMemos = Array.from(uniqueMemosMap.values()).sort((a, b) => {
-              const dateA = new Date(a.created_at || a.date || 0).getTime();
-              const dateB = new Date(b.created_at || b.date || 0).getTime();
-              return dateB - dateA;
-            });
-
+          if (completeMemos.length > 0 || currentMemos.length === 0) {
             store.setMemos(completeMemos);
           }
         }
