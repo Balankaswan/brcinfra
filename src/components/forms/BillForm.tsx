@@ -72,18 +72,7 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
 
   const primarySlip = activeSlips[0];
 
-  const eligibleLrsForParty = useMemo(() => {
-    if (!allSlips) return [];
-    const partyName = (formData?.party || '').trim().toLowerCase();
-    return allSlips.filter(s => {
-      const id = String(s.id || (s as any)._id);
-      const isAlreadySelected = selectedLrIds.includes(id);
-      const sParty = (s.consignor_name || s.party || '').trim().toLowerCase();
-      const matchesParty = !partyName || sParty === partyName;
-      const isUnbilled = !s.bill_number || s.bill_number === formData?.bill_number;
-      return isAlreadySelected || (matchesParty && isUnbilled);
-    });
-  }, [allSlips, formData?.party, formData?.bill_number, selectedLrIds]);
+  // eligibleLrsForParty is declared AFTER formData state to avoid TDZ crash
 
   const handleToggleLrSelection = (lrId: string) => {
     const nextSelected = selectedLrIds.includes(lrId)
@@ -218,6 +207,20 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
     status: (initialData?.status || 'pending') as 'pending' | 'received',
     narration: initialData?.narration || '',
   });
+
+  // ── Eligible LRs for the current party (must be AFTER formData state to avoid TDZ) ──
+  const eligibleLrsForParty = useMemo(() => {
+    if (!allSlips) return [];
+    const partyName = (formData.party || '').trim().toLowerCase();
+    return allSlips.filter(s => {
+      const id = String(s.id || (s as any)._id);
+      const isAlreadySelected = selectedLrIds.includes(id);
+      const sParty = (s.consignor_name || s.party || '').trim().toLowerCase();
+      const matchesParty = !partyName || sParty === partyName;
+      const isUnbilled = !s.bill_number || s.bill_number === formData.bill_number;
+      return isAlreadySelected || (matchesParty && isUnbilled);
+    });
+  }, [allSlips, formData.party, formData.bill_number, selectedLrIds]);
 
   // ── Auto-calculate GST + invoice values ──
   useEffect(() => {
