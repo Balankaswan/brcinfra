@@ -2,6 +2,7 @@ import jsPDF from 'jspdf';
 import { COMPANY_LOGO_BASE64 } from '../assets/logo';
 import type { LoadingSlip, Memo, Bill } from '../types';
 import { isFuelAdvance } from '../components/Memo';
+import { COMPANY_CONFIG } from '../config/companyConfig';
 
 // Signature base64 - Add your actual signature image here
 const SIGNATURE_BASE64: string = ''; // Empty until you add your actual signature base64
@@ -685,19 +686,25 @@ export const generateBillPDF = async (
   pdf.text(COMPANY_INFO.location, 40, currentY + 19);
   pdf.text(`${COMPANY_INFO.phone}  |  ${COMPANY_INFO.pan}`, 40, currentY + 23);
 
-  // Document Title Badge
+  // Document Title Badge — show RCM variant if applicable
+  const isRCMBill = bill.gst_type === 'reverse_charge';
   pdf.setFillColor(primaryRed[0], primaryRed[1], primaryRed[2]);
   pdf.rect(pageWidth - 65, 12, 57, 10, 'F');
   pdf.setFont('helvetica', 'bold');
-  pdf.setFontSize(11);
+  pdf.setFontSize(isRCMBill ? 9 : 11);
   pdf.setTextColor(255, 255, 255);
-  pdf.text('TAX INVOICE / BILL', pageWidth - 36.5, 18.5, { align: 'center' });
+  pdf.text(isRCMBill ? 'TAX INVOICE (RCM)' : 'TAX INVOICE / BILL', pageWidth - 36.5, 18.5, { align: 'center' });
 
-  // GSTIN & HSN Note under badge
+  // Company GSTIN & SAC Code under badge
   pdf.setFontSize(7);
   pdf.setTextColor(0, 0, 0);
-  pdf.text(`GSTIN: ${bill.party_gstin || primarySlip?.consignor_gstin || '24AAACF1234A1Z1'}`, pageWidth - 65, 26);
-  pdf.text(`SAC Code: ${bill.hsn_code || '996511 (GTA)'}`, pageWidth - 65, 30);
+  pdf.text(`Our GSTIN: ${COMPANY_CONFIG.gstin}`, pageWidth - 65, 26);
+  pdf.text(`SAC Code: ${bill.hsn_code || COMPANY_CONFIG.sacCode} (GTA)`, pageWidth - 65, 30);
+  if (isRCMBill) {
+    pdf.setTextColor(180, 60, 0);
+    pdf.text('Reverse Charge Applicable', pageWidth - 65, 34);
+    pdf.setTextColor(0, 0, 0);
+  }
 
   currentY = 38;
 
@@ -922,22 +929,58 @@ export const generateBillPDF = async (
     calcY += 5;
   };
 
+  // Compute taxable value
+  const taxableVal = bill.taxable_value ||
+    (displayFreightTotal +
+      (bill.detention_taxable !== false ? (bill.detention || 0) : 0) +
+      (bill.extra_taxable !== false ? (bill.extra || 0) : 0) +
+      (bill.rto_taxable === true ? (bill.rto || 0) : 0));
+
   addCalcLine('Basic Freight Amount:', displayFreightTotal);
-  if (bill.detention > 0) addCalcLine('Halting / Detention Charge:', bill.detention);
-  if ((bill.extra || 0) + (bill.rto || 0) + (bill.mamool || 0) > 0) {
-    const addl = (bill.extra || 0) + (bill.rto || 0) + (bill.mamool || 0);
-    addCalcLine('Extra / RTO / Service Charges:', addl);
+  if ((bill.detention || 0) > 0) {
+    addCalcLine(`Detention / Halting${bill.detention_taxable === false ? ' (Non-Taxable)' : ''}:`, bill.detention || 0);
+  }
+  if ((bill.extra || 0) > 0) {
+    addCalcLine(`Extra Weight Charges${bill.extra_taxable === false ? ' (Non-Taxable)' : ''}:`, bill.extra || 0);
+  }
+  if ((bill.rto || 0) > 0) {
+    addCalcLine(`RTO Charges${!bill.rto_taxable ? ' (Non-Taxable)' : ''}:`, bill.rto || 0);
   }
 
-  const grossTotal = displayFreightTotal + (bill.detention || 0) + (bill.extra || 0) + (bill.rto || 0) + (bill.mamool || 0);
+  // Taxable Value divider
+  pdf.setLineWidth(0.3);
+  pdf.setDrawColor(180, 180, 180);
+  pdf.line(pageWidth - 9 - rightColW + 2, calcY, pageWidth - 11, calcY);
+  calcY += 1;
+  addCalcLine('Taxable Value:', taxableVal, false, true);
+
+  // GST Breakdown
+  const gstAmt = bill.gst_amount || 0;
+  if (gstAmt > 0) {
+    const isCgstSgst = bill.gst_tax_type === 'cgst_sgst';
+    if (isCgstSgst) {
+      const half = (bill.gst_percentage || 0) / 2;
+      addCalcLine(`CGST @ ${half}%:`, bill.cgst_amount || gstAmt / 2);
+      addCalcLine(`SGST @ ${half}%:`, bill.sgst_amount || gstAmt / 2);
+    } else {
+      addCalcLine(`IGST @ ${bill.gst_percentage || 0}%:`, bill.igst_amount || gstAmt);
+    }
+    if (isRCMBill) {
+      pdf.setFont('helvetica', 'italic');
+      pdf.setFontSize(6.5);
+      pdf.setTextColor(180, 60, 0);
+      pdf.text('(RCM – not charged to party)', pageWidth - 9 - rightColW + 3, calcY);
+      pdf.setTextColor(textDark[0], textDark[1], textDark[2]);
+      calcY += 4;
+    }
+  }
+
+  const grossTotal = bill.gross_invoice_amount || (taxableVal + (isRCMBill ? 0 : gstAmt));
 
   if (bill.party_commission_cut > 0) addCalcLine('Party Commission Cut:', bill.party_commission_cut, true);
   if (bill.tds > 0) addCalcLine('TDS Deducted:', bill.tds, true);
   if (bill.penalties > 0) addCalcLine('Shortage / Penalties:', bill.penalties, true);
-
-  if (bill.gst_amount && bill.gst_amount > 0) {
-    addCalcLine(`GST (${bill.gst_percentage || 5}%):`, bill.gst_amount);
-  }
+  if ((bill.mamool || 0) > 0) addCalcLine('Mamool:', bill.mamool || 0, true);
 
   // Divider Line before Net Amount
   pdf.setLineWidth(0.4);
@@ -945,8 +988,11 @@ export const generateBillPDF = async (
   pdf.line(pageWidth - 9 - rightColW + 2, calcY, pageWidth - 11, calcY);
   calcY += 4.5;
 
+  // Gross Invoice Amount row
+  addCalcLine(`Gross Invoice Amount${isRCMBill ? ' (excl. RCM GST)' : ''}:`, grossTotal, false, true);
+
   // NET AMOUNT HIGHLIGHT BOX
-  const finalNet = bill.net_amount || bill.total_invoice_value || (grossTotal - (bill.party_commission_cut || 0) - (bill.tds || 0) - (bill.penalties || 0) + (bill.gst_amount || 0));
+  const finalNet = bill.net_amount || (grossTotal - (bill.party_commission_cut || 0) - (bill.tds || 0) - (bill.penalties || 0) - (bill.mamool || 0) - (bill.commission || 0));
 
   pdf.setFillColor(primaryRed[0], primaryRed[1], primaryRed[2]);
   pdf.rect(pageWidth - 9 - rightColW + 2, calcY - 3, rightColW - 4, 8, 'F');
@@ -954,7 +1000,7 @@ export const generateBillPDF = async (
   pdf.setFont('helvetica', 'bold');
   pdf.setFontSize(9);
   pdf.setTextColor(255, 255, 255);
-  pdf.text('NET INVOICE VALUE:', pageWidth - 9 - rightColW + 5, calcY + 2.5);
+  pdf.text('NET PAYABLE AMOUNT:', pageWidth - 9 - rightColW + 5, calcY + 2.5);
   pdf.text(`Rs. ${finalNet.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`, pageWidth - 12, calcY + 2.5, { align: 'right' });
 
 
@@ -978,35 +1024,41 @@ export const generateBillPDF = async (
 
   pdf.text('Account Name:', 12, bankY);
   pdf.setFont('helvetica', 'normal');
-  pdf.text('BHAVISHYA ROAD CARRIERS', 42, bankY);
+  pdf.text(COMPANY_CONFIG.accountHolder, 42, bankY);
 
   pdf.setFont('helvetica', 'bold');
   pdf.text('Bank Name:', 12, bankY + 6);
   pdf.setFont('helvetica', 'normal');
-  pdf.text('ICICI BANK LTD', 42, bankY + 6);
+  pdf.text(COMPANY_CONFIG.bankName, 42, bankY + 6);
 
   pdf.setFont('helvetica', 'bold');
   pdf.text('Account No:', 12, bankY + 12);
   pdf.setFont('helvetica', 'normal');
-  pdf.text('231005501207', 42, bankY + 12);
+  pdf.text(COMPANY_CONFIG.accountNumber, 42, bankY + 12);
 
   pdf.setFont('helvetica', 'bold');
   pdf.text('IFSC Code:', 12, bankY + 18);
   pdf.setFont('helvetica', 'normal');
-  pdf.text('ICIC0002310', 42, bankY + 18);
+  pdf.text(COMPANY_CONFIG.ifsc, 42, bankY + 18);
 
   pdf.setFont('helvetica', 'bold');
   pdf.text('Branch:', 12, bankY + 24);
   pdf.setFont('helvetica', 'normal');
-  pdf.text('GHODASAR, AHMEDABAD', 42, bankY + 24);
+  pdf.text(COMPANY_CONFIG.branchAddress, 42, bankY + 24);
 
-  // GST Declaration / Note
-  pdf.setFontSize(7);
+  // GST Note — RCM or Forward Charge
+  pdf.setFontSize(6.5);
   pdf.setFont('helvetica', 'italic');
-  pdf.setTextColor(100, 100, 100);
-  pdf.text('Note: Goods Transport Agency (GTA) Services.', 12, bankY + 32);
-  pdf.text('GST payable under Reverse Charge Mechanism (RCM)', 12, bankY + 36);
-  pdf.text('by the Recipient of Service as per Notification No. 13/2017.', 12, bankY + 40);
+  if (isRCMBill) {
+    pdf.setTextColor(180, 60, 0);
+    const rcmLines = pdf.splitTextToSize(COMPANY_CONFIG.rcmNote, leftColW - 6);
+    pdf.text(rcmLines, 12, bankY + 32);
+  } else {
+    pdf.setTextColor(100, 100, 100);
+    pdf.text('Note: Goods Transport Agency (GTA) Services.', 12, bankY + 32);
+    pdf.text('GST charged under Forward Charge Mechanism.', 12, bankY + 36);
+    pdf.text(`SAC Code: ${bill.hsn_code || COMPANY_CONFIG.sacCode} | GSTIN: ${COMPANY_CONFIG.gstin}`, 12, bankY + 40);
+  }
 
   currentY = summaryBoxY + 62;
 

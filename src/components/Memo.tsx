@@ -147,7 +147,17 @@ const MemoComponent: React.FC<MemoListProps> = ({ showOnlyFullyPaid = false, hig
   };
 
   const getNextMemoNumber = () => {
-    return getNextSequenceNumber(memos, 'memo_number', 'MO');
+    // Format: FM-XXXX (4-digit zero-padded)
+    const prefix = 'FM-';
+    const highest = memos.reduce((max, m) => {
+      if (m.memo_number && m.memo_number.startsWith(prefix)) {
+        const n = parseInt(m.memo_number.slice(prefix.length), 10);
+        if (!isNaN(n) && n > max) return n;
+      }
+      return max;
+    }, 0);
+    const next = highest + 1;
+    return `${prefix}${String(next).padStart(4, '0')}`;
   };
 
   const handleEditMemo = (memo: Memo) => {

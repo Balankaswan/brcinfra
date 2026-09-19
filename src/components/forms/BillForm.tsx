@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { X, Calculator, Upload, ChevronDown, ChevronUp } from 'lucide-react';
+import { X, Calculator, Upload, ChevronDown, ChevronUp, Info } from 'lucide-react';
 import { formatCurrency } from '../../utils/numberGenerator';
 import PDFGenerator from '../PDFGenerator';
 import { apiService } from '../../lib/api';
 import { useDataStore } from '../../lib/store';
+import { COMPANY_CONFIG } from '../../config/companyConfig';
 import type { LoadingSlip, Bill } from '../../types';
 
 interface BillFormProps {
@@ -24,7 +25,12 @@ const getCurrentFinancialYear = (): string => {
   return `${String(fy).slice(-2)}-${String(fy + 1).slice(-2)}`;
 };
 
-const GST_PERCENTAGES = [0, 5, 12, 18, 28];
+// Detect intra vs inter state from party GSTIN
+const detectGstTaxType = (partyGstin: string): 'cgst_sgst' | 'igst' => {
+  if (!partyGstin || partyGstin.length < 2) return 'igst';
+  const partyState = partyGstin.substring(0, 2);
+  return partyState === COMPANY_CONFIG.stateCode ? 'cgst_sgst' : 'igst';
+};
 
 const SectionHeader: React.FC<{ title: string; children?: React.ReactNode }> = ({ title, children }) => (
   <div className="flex items-center justify-between bg-gray-100 border border-gray-200 rounded px-3 py-2 mb-4">
@@ -80,7 +86,7 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
     date: primarySlip?.date
       ? new Date(primarySlip.date).toISOString().split('T')[0]
       : new Date().toISOString().split('T')[0],
-    branch_code: initialData?.branch_code || 'AHD',
+    branch_code: initialData?.branch_code || COMPANY_CONFIG.defaultBranchCode,
     financial_year: initialData?.financial_year || getCurrentFinancialYear(),
 
     // LR references
@@ -103,21 +109,37 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
     driver_name: initialData?.driver_name || primarySlip?.driver_name || '',
     dl_number: initialData?.dl_number || primarySlip?.dl_number || '',
 
-    // Freight
+    // Freight (base taxable)
     bill_amount: initialData?.bill_amount
       ?? activeSlips.reduce((sum, s) => sum + (s.total_amount || s.total_freight || s.freight || 0), 0),
-    detention: initialData?.detention
-      ?? activeSlips.reduce((sum, s) => sum + (s.demurrage_charge || 0), 0),
+
+    // Additional charges
+    detention: initialData?.detention ?? activeSlips.reduce((sum, s) => sum + (s.demurrage_charge || 0), 0),
     extra: initialData?.extra ?? 0,
-    rto: initialData?.rto
-      ?? activeSlips.reduce((sum, s) => sum + (s.rto || 0), 0),
+    rto: initialData?.rto ?? activeSlips.reduce((sum, s) => sum + (s.rto || 0), 0),
+
+    // Taxability flags — freight always taxable; rto default non-taxable
+    detention_taxable: initialData?.detention_taxable ?? true,
+    extra_taxable: initialData?.extra_taxable ?? true,
+    rto_taxable: initialData?.rto_taxable ?? false,
 
     // GST
-    hsn_code: initialData?.hsn_code || primarySlip?.hsn_code || '',
-    gst_type: (initialData?.gst_type || (primarySlip?.gst_paid_by === 'transporter' ? 'reverse_charge' : 'forward_charge') || '') as 'forward_charge' | 'reverse_charge' | '',
-    gst_percentage: initialData?.gst_percentage ?? 0,
+    hsn_code: initialData?.hsn_code || primarySlip?.hsn_code || COMPANY_CONFIG.sacCode,
+    gst_type: (initialData?.gst_type || COMPANY_CONFIG.defaultGstType) as 'forward_charge' | 'reverse_charge',
+    gst_percentage: initialData?.gst_percentage ?? 5,
     gst_payable_by: initialData?.gst_payable_by || primarySlip?.gst_paid_by || '',
+    // Intra/Inter-state detection
+    gst_tax_type: (initialData?.gst_tax_type ||
+      detectGstTaxType(initialData?.party_gstin || primarySlip?.consignor_gstin || '')) as 'cgst_sgst' | 'igst',
+
+    // Computed (auto-calculated)
+    taxable_value: initialData?.taxable_value ?? 0,
+    non_taxable_amount: initialData?.non_taxable_amount ?? 0,
     gst_amount: initialData?.gst_amount ?? 0,
+    cgst_amount: initialData?.cgst_amount ?? 0,
+    sgst_amount: initialData?.sgst_amount ?? 0,
+    igst_amount: initialData?.igst_amount ?? 0,
+    gross_invoice_amount: initialData?.gross_invoice_amount ?? 0,
     total_invoice_value: initialData?.total_invoice_value ?? 0,
 
     // Deductions
@@ -136,23 +158,64 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
     narration: initialData?.narration || '',
   });
 
-  // ── Auto-calculate GST amount & total invoice value ──
+  // ── Auto-calculate GST + invoice values ──
   useEffect(() => {
-    const base = formData.bill_amount + formData.detention + formData.rto + formData.extra;
-    const gstAmt = (base * (formData.gst_percentage || 0)) / 100;
-    const totalInvoice = base + gstAmt;
-    setFormData(prev => ({ ...prev, gst_amount: gstAmt, total_invoice_value: totalInvoice }));
-  }, [formData.bill_amount, formData.detention, formData.rto, formData.extra, formData.gst_percentage]);
+    const freight = formData.bill_amount;
+    const detentionAmt = formData.detention_taxable ? formData.detention : 0;
+    const extraAmt = formData.extra_taxable ? formData.extra : 0;
+    const rtoAmt = formData.rto_taxable ? formData.rto : 0;
 
-  // ── Auto-calculate net amount ──
-  useEffect(() => {
-    const gross = formData.bill_amount + formData.detention + formData.rto + formData.extra;
+    // Non-taxable portion
+    const detentionNT = formData.detention_taxable ? 0 : formData.detention;
+    const extraNT = formData.extra_taxable ? 0 : formData.extra;
+    const rtoNT = formData.rto_taxable ? 0 : formData.rto;
+    const nonTaxable = detentionNT + extraNT + rtoNT;
+
+    const taxableVal = freight + detentionAmt + extraAmt + rtoAmt;
+    const gstAmt = (taxableVal * (formData.gst_percentage || 0)) / 100;
+
+    let cgst = 0, sgst = 0, igst = 0;
+    if (formData.gst_tax_type === 'cgst_sgst') {
+      cgst = gstAmt / 2;
+      sgst = gstAmt / 2;
+    } else {
+      igst = gstAmt;
+    }
+
+    // For Forward Charge: GST is added to gross invoice
+    // For RCM: GST is NOT added to gross invoice (shown as disclosure only)
+    const grossInvoice = formData.gst_type === 'forward_charge'
+      ? taxableVal + gstAmt
+      : taxableVal;
+
+    // Net payable = gross invoice - deductions (TDS + mamool + commission + penalties + party_commission_cut)
     const deductions = formData.mamool + formData.commission + formData.tds + formData.penalties + formData.party_commission_cut;
-    setFormData(prev => ({ ...prev, net_amount: gross - deductions }));
+    const net = grossInvoice - deductions;
+
+    setFormData(prev => ({
+      ...prev,
+      taxable_value: taxableVal,
+      non_taxable_amount: nonTaxable,
+      gst_amount: gstAmt,
+      cgst_amount: cgst,
+      sgst_amount: sgst,
+      igst_amount: igst,
+      gross_invoice_amount: grossInvoice,
+      total_invoice_value: grossInvoice,
+      net_amount: net,
+    }));
   }, [
-    formData.bill_amount, formData.detention, formData.rto, formData.extra,
+    formData.bill_amount, formData.detention, formData.extra, formData.rto,
+    formData.detention_taxable, formData.extra_taxable, formData.rto_taxable,
+    formData.gst_percentage, formData.gst_type, formData.gst_tax_type,
     formData.mamool, formData.commission, formData.tds, formData.penalties, formData.party_commission_cut,
   ]);
+
+  // ── Re-detect tax type when party GSTIN changes ──
+  useEffect(() => {
+    const detected = detectGstTaxType(formData.party_gstin);
+    setFormData(prev => ({ ...prev, gst_tax_type: detected }));
+  }, [formData.party_gstin]);
 
   // ── Re-populate when initialData changes (edit mode) ──
   useEffect(() => {
@@ -164,7 +227,7 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
         loading_slip_ids: initialData.loading_slip_ids || [initialData.loading_slip_id],
         linked_lr_numbers: initialData.linked_lr_numbers || [],
         date: initialData.date.split('T')[0],
-        branch_code: initialData.branch_code || 'AHD',
+        branch_code: initialData.branch_code || COMPANY_CONFIG.defaultBranchCode,
         financial_year: initialData.financial_year || getCurrentFinancialYear(),
         party: initialData.party,
         party_contact: initialData.party_contact || '',
@@ -174,9 +237,13 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
         detention: initialData.detention || 0,
         extra: initialData.extra || 0,
         rto: initialData.rto || 0,
-        hsn_code: initialData.hsn_code || '',
-        gst_type: initialData.gst_type || '',
-        gst_percentage: initialData.gst_percentage ?? 0,
+        detention_taxable: initialData.detention_taxable ?? true,
+        extra_taxable: initialData.extra_taxable ?? true,
+        rto_taxable: initialData.rto_taxable ?? false,
+        hsn_code: initialData.hsn_code || COMPANY_CONFIG.sacCode,
+        gst_type: initialData.gst_type || 'forward_charge',
+        gst_percentage: initialData.gst_percentage ?? 5,
+        gst_tax_type: initialData.gst_tax_type || detectGstTaxType(initialData.party_gstin || ''),
         gst_payable_by: initialData.gst_payable_by || '',
         mamool: initialData.mamool,
         tds: initialData.tds,
@@ -203,8 +270,9 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
         bill_amount: activeSlips.reduce((sum, s) => sum + (s.total_amount || s.total_freight || s.freight || 0), 0),
         rto: activeSlips.reduce((sum, s) => sum + (s.rto || 0), 0),
         detention: activeSlips.reduce((sum, s) => sum + (s.demurrage_charge || 0), 0),
-        hsn_code: ps.hsn_code || '',
+        hsn_code: ps.hsn_code || COMPANY_CONFIG.sacCode,
         gst_type: ps.gst_paid_by === 'transporter' ? 'reverse_charge' : 'forward_charge',
+        gst_tax_type: detectGstTaxType(ps.consignor_gstin || ''),
         gst_payable_by: ps.gst_paid_by || '',
       }));
     }
@@ -216,6 +284,9 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
   };
   const handleText = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     setFormData(prev => ({ ...prev, [e.target.name]: e.target.value }));
+  };
+  const handleBool = (name: string, value: boolean) => {
+    setFormData(prev => ({ ...prev, [name]: value }));
   };
 
   const applyPartyFromMaster = (name: string) => {
@@ -275,6 +346,9 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
   const inputCls = 'w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white';
   const readOnlyCls = 'w-full px-3 py-2 border border-gray-200 rounded-lg text-sm bg-gray-50 text-gray-700';
   const labelCls = 'block text-xs font-medium text-gray-600 mb-1';
+
+  const isRCM = formData.gst_type === 'reverse_charge';
+  const hasGst = formData.gst_percentage > 0;
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
@@ -360,7 +434,11 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
                   <p className="text-xs text-red-400 mt-0.5">Please Avoid using Special Characters.</p>
                 </div>
                 <div>
-                  <label className={labelCls}>GSTIN</label>
+                  <label className={labelCls}>GSTIN
+                    <span className="ml-2 text-xs font-normal text-gray-400">
+                      {formData.party_gstin ? (formData.gst_tax_type === 'cgst_sgst' ? '(Intra-State → CGST+SGST)' : '(Inter-State → IGST)') : ''}
+                    </span>
+                  </label>
                   <input type="text" name="party_gstin" value={formData.party_gstin}
                     onChange={handleText} className={inputCls} placeholder="GST Number" />
                 </div>
@@ -368,7 +446,7 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
             </div>
           </div>
 
-          {/* ── Section 2B: Supplier / Lorry Owner Details (Remembered from LR) ── */}
+          {/* ── Section 2B: Supplier / Lorry Owner Details ── */}
           <div className="border border-amber-200 bg-amber-50/40 rounded-lg overflow-hidden">
             <SectionHeader title="Supplier / Lorry Owner & Vehicle Details (Auto-filled from LR)" />
             <div className="px-4 pb-4 space-y-3">
@@ -404,7 +482,6 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
               <div className="px-4 pb-4 space-y-4">
                 {activeSlips.map((s, idx) => (
                   <div key={s.id || idx} className="bg-blue-50 border border-blue-100 rounded-lg p-3 space-y-3">
-                    {/* Row 1: LR No | Date | From | To */}
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                       <div>
                         <label className={labelCls}>Bilty Number</label>
@@ -423,7 +500,6 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
                         <input value={s.to_location || ''} readOnly className={readOnlyCls} />
                       </div>
                     </div>
-                    {/* Row 2: Material | Weight | Unit | Rate | Freight Amount */}
                     <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                       <div>
                         <label className={labelCls}>Material Name</label>
@@ -450,7 +526,6 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
                         <input value={s.total_amount || s.total_freight || s.freight || ''} readOnly className={readOnlyCls} />
                       </div>
                     </div>
-                    {/* Row 3: Vehicle | Halting | Other Charges */}
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                       <div>
                         <label className={labelCls}>Vehicle Number</label>
@@ -465,31 +540,8 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
                         <input value={s.other_charge || 0} readOnly className={readOnlyCls} />
                       </div>
                       <div>
-                        <label className={labelCls}>HSN Code</label>
+                        <label className={labelCls}>HSN / SAC Code</label>
                         <input value={s.hsn_code || ''} readOnly className={readOnlyCls} />
-                      </div>
-                    </div>
-                    {/* Row 4: Invoice No | Invoice Date | Total | Advance | Balance */}
-                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                      <div>
-                        <label className={labelCls}>Consignee Invoice No</label>
-                        <input value={s.invoice_number || ''} readOnly className={readOnlyCls} />
-                      </div>
-                      <div>
-                        <label className={labelCls}>Invoice Date</label>
-                        <input value={s.invoice_date ? new Date(s.invoice_date).toLocaleDateString('en-IN') : ''} readOnly className={readOnlyCls} />
-                      </div>
-                      <div>
-                        <label className={labelCls}>Total Amount</label>
-                        <input value={s.total_amount || s.total_freight || s.freight || ''} readOnly className={readOnlyCls} />
-                      </div>
-                      <div>
-                        <label className={labelCls}>Advance Amount</label>
-                        <input value={s.advance_amount || s.advance || 0} readOnly className={readOnlyCls} />
-                      </div>
-                      <div>
-                        <label className={labelCls}>Balance Amount</label>
-                        <input value={s.balance_amount || s.balance || 0} readOnly className={readOnlyCls} />
                       </div>
                     </div>
                   </div>
@@ -498,45 +550,203 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
             </div>
           )}
 
-          {/* ── Section 4: Freight Details ── */}
+          {/* ── Section 4: Freight & Charges ── */}
           <div className="border border-gray-200 rounded-lg overflow-hidden">
-            <SectionHeader title="Freight Details" />
-            <div className="px-4 pb-4 space-y-3">
+            <SectionHeader title="Freight & Charges" />
+            <div className="px-4 pb-4 space-y-4">
+              {/* Freight (always taxable) */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <label className={labelCls}>Total Freight Amount (₹) <span className="text-red-500">*</span></label>
+                  <label className={labelCls}>
+                    Total Freight Amount (₹) <span className="text-red-500">*</span>
+                    <span className="ml-2 text-xs text-green-600 font-medium">● Taxable</span>
+                  </label>
                   <input type="number" name="bill_amount" value={formData.bill_amount}
                     onChange={handleNum} className={inputCls} step="0.01" min="0" required />
                 </div>
                 <div>
-                  <label className={labelCls}>HSN Code</label>
+                  <label className={labelCls}>HSN / SAC Code</label>
                   <input type="text" name="hsn_code" value={formData.hsn_code}
-                    onChange={handleText} className={inputCls} placeholder="Enter HSN Code" />
+                    onChange={handleText} className={inputCls} placeholder="e.g. 996511" />
                 </div>
               </div>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+
+              {/* Detention */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
                 <div>
-                  <label className={labelCls}>GST Type</label>
-                  <select name="gst_type" value={formData.gst_type} onChange={handleText} className={inputCls}>
-                    <option value="">Select GST Type</option>
-                    <option value="forward_charge">Forward Charge</option>
-                    <option value="reverse_charge">Reverse Charge</option>
-                  </select>
-                  {formData.gst_type === 'reverse_charge' && (
-                    <p className="text-xs text-orange-500 mt-0.5 font-medium">GST ON REVERSE CHARGE</p>
-                  )}
+                  <label className={labelCls}>Detention / Halting (₹)</label>
+                  <input type="number" name="detention" value={formData.detention}
+                    onChange={handleNum} className={inputCls} step="0.01" min="0" />
                 </div>
                 <div>
-                  <label className={labelCls}>GST Percentage</label>
+                  <label className={labelCls}>Detention — GST Applicability</label>
+                  <div className="flex gap-3 mt-1">
+                    <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+                      <input type="radio" checked={formData.detention_taxable === true}
+                        onChange={() => handleBool('detention_taxable', true)}
+                        className="text-green-600" />
+                      <span className="text-green-700 font-medium">Taxable</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+                      <input type="radio" checked={formData.detention_taxable === false}
+                        onChange={() => handleBool('detention_taxable', false)}
+                        className="text-gray-600" />
+                      <span className="text-gray-600">Non-Taxable</span>
+                    </label>
+                  </div>
+                </div>
+                <div className="text-xs text-gray-500 bg-gray-50 rounded p-2">
+                  Detention taxable: <strong>{formData.detention_taxable ? formatCurrency(formData.detention) : '₹0'}</strong>
+                </div>
+              </div>
+
+              {/* Extra */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+                <div>
+                  <label className={labelCls}>Extra Weight Charges (₹)</label>
+                  <input type="number" name="extra" value={formData.extra}
+                    onChange={handleNum} className={inputCls} step="0.01" min="0" />
+                </div>
+                <div>
+                  <label className={labelCls}>Extra Charge — GST Applicability</label>
+                  <div className="flex gap-3 mt-1">
+                    <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+                      <input type="radio" checked={formData.extra_taxable === true}
+                        onChange={() => handleBool('extra_taxable', true)}
+                        className="text-green-600" />
+                      <span className="text-green-700 font-medium">Taxable</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+                      <input type="radio" checked={formData.extra_taxable === false}
+                        onChange={() => handleBool('extra_taxable', false)}
+                        className="text-gray-600" />
+                      <span className="text-gray-600">Non-Taxable</span>
+                    </label>
+                  </div>
+                </div>
+                <div className="text-xs text-gray-500 bg-gray-50 rounded p-2">
+                  Extra taxable: <strong>{formData.extra_taxable ? formatCurrency(formData.extra) : '₹0'}</strong>
+                </div>
+              </div>
+
+              {/* RTO */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+                <div>
+                  <label className={labelCls}>RTO / Other Recovery (₹)</label>
+                  <input type="number" name="rto" value={formData.rto}
+                    onChange={handleNum} className={inputCls} step="0.01" min="0" />
+                </div>
+                <div>
+                  <label className={labelCls}>RTO — GST Applicability</label>
+                  <div className="flex gap-3 mt-1">
+                    <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+                      <input type="radio" checked={formData.rto_taxable === true}
+                        onChange={() => handleBool('rto_taxable', true)}
+                        className="text-green-600" />
+                      <span className="text-green-700 font-medium">Taxable</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+                      <input type="radio" checked={formData.rto_taxable === false}
+                        onChange={() => handleBool('rto_taxable', false)}
+                        className="text-gray-600" />
+                      <span className="text-gray-600">Non-Taxable</span>
+                    </label>
+                  </div>
+                </div>
+                <div className="text-xs text-gray-500 bg-gray-50 rounded p-2">
+                  RTO taxable: <strong>{formData.rto_taxable ? formatCurrency(formData.rto) : '₹0'}</strong>
+                </div>
+              </div>
+
+              {/* Taxable Value Summary */}
+              <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 flex items-center justify-between">
+                <span className="text-sm font-semibold text-blue-900">Taxable Value (GST Base):</span>
+                <span className="text-lg font-bold text-blue-800">{formatCurrency(formData.taxable_value)}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* ── Section 5: GST Details ── */}
+          <div className={`border rounded-lg overflow-hidden ${isRCM ? 'border-orange-300 bg-orange-50/30' : 'border-green-200 bg-green-50/20'}`}>
+            <SectionHeader title={isRCM ? '⚠ GST Details — Reverse Charge (RCM)' : '✓ GST Details — Forward Charge'}>
+              {isRCM && (
+                <span className="text-xs font-bold text-orange-700 bg-orange-100 px-2 py-0.5 rounded-full">
+                  RCM
+                </span>
+              )}
+            </SectionHeader>
+            <div className="px-4 pb-4 space-y-4">
+
+              {/* GST Charge Type */}
+              <div>
+                <label className={labelCls}>GST Charge Type <span className="text-red-500">*</span></label>
+                <div className="flex gap-6 mt-1">
+                  <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                    <input type="radio" name="gst_type" value="forward_charge"
+                      checked={formData.gst_type === 'forward_charge'}
+                      onChange={handleText}
+                      className="text-green-600 focus:ring-green-500" />
+                    <span className={formData.gst_type === 'forward_charge' ? 'text-green-700 font-semibold' : 'text-gray-700'}>
+                      Forward Charge
+                    </span>
+                  </label>
+                  <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                    <input type="radio" name="gst_type" value="reverse_charge"
+                      checked={formData.gst_type === 'reverse_charge'}
+                      onChange={handleText}
+                      className="text-orange-600 focus:ring-orange-500" />
+                    <span className={formData.gst_type === 'reverse_charge' ? 'text-orange-700 font-semibold' : 'text-gray-700'}>
+                      Reverse Charge (RCM)
+                    </span>
+                  </label>
+                </div>
+                {isRCM && (
+                  <div className="mt-2 flex items-start gap-2 text-xs text-orange-700 bg-orange-50 border border-orange-200 rounded p-2">
+                    <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                    <span>
+                      Under RCM: GST is calculated for documentation purposes only. It is <strong>NOT added</strong> to the customer's payable amount. The recipient pays GST directly to the government.
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* GST Rate + Tax Type */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label className={labelCls}>GST Rate</label>
                   <select name="gst_percentage"
                     value={formData.gst_percentage}
                     onChange={e => setFormData(prev => ({ ...prev, gst_percentage: parseFloat(e.target.value) || 0 }))}
                     className={inputCls}>
-                    <option value="0">Select GST %</option>
-                    {GST_PERCENTAGES.map(p => (
+                    {COMPANY_CONFIG.gstRates.map(p => (
                       <option key={p} value={p}>{p}%</option>
                     ))}
                   </select>
+                </div>
+                <div>
+                  <label className={labelCls}>Tax Type
+                    <span className="ml-1 text-xs text-gray-400">(auto-detected from GSTIN)</span>
+                  </label>
+                  <div className="flex gap-4 mt-1">
+                    <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+                      <input type="radio" checked={formData.gst_tax_type === 'cgst_sgst'}
+                        onChange={() => handleBool('gst_tax_type', true)}
+                        onClick={() => setFormData(prev => ({ ...prev, gst_tax_type: 'cgst_sgst' }))}
+                        className="text-blue-600" />
+                      <span className={formData.gst_tax_type === 'cgst_sgst' ? 'text-blue-700 font-semibold' : 'text-gray-600'}>
+                        CGST + SGST (Intra)
+                      </span>
+                    </label>
+                    <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+                      <input type="radio" checked={formData.gst_tax_type === 'igst'}
+                        onClick={() => setFormData(prev => ({ ...prev, gst_tax_type: 'igst' }))}
+                        onChange={() => {}}
+                        className="text-purple-600" />
+                      <span className={formData.gst_tax_type === 'igst' ? 'text-purple-700 font-semibold' : 'text-gray-600'}>
+                        IGST (Inter)
+                      </span>
+                    </label>
+                  </div>
                 </div>
                 <div>
                   <label className={labelCls}>GST Payable By</label>
@@ -547,75 +757,100 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
                     <option value="transporter">Transporter</option>
                   </select>
                 </div>
-                <div>
-                  <label className={labelCls}>Total Invoice Value (with GST) <span className="text-red-500">*</span></label>
-                  <input value={formData.total_invoice_value?.toFixed(2) || '0.00'} readOnly className={readOnlyCls} />
-                </div>
               </div>
-              {formData.gst_percentage > 0 && (
-                <p className="text-xs text-gray-500">
-                  GST Amount ({formData.gst_percentage}%): <strong>{formatCurrency(formData.gst_amount || 0)}</strong>
-                </p>
-              )}
-            </div>
-          </div>
 
-          {/* ── Section 5: Extra Charges ── */}
-          <div className="border border-gray-200 rounded-lg overflow-hidden">
-            <SectionHeader title="Additional Charges" />
-            <div className="px-4 pb-4">
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                <div>
-                  <label className={labelCls}>Detention / Halting (₹)</label>
-                  <input type="number" name="detention" value={formData.detention}
-                    onChange={handleNum} className={inputCls} step="0.01" min="0" />
+              {/* GST Calculation Breakdown Box */}
+              {hasGst && (
+                <div className={`rounded-lg border p-4 ${isRCM ? 'bg-orange-50 border-orange-200' : 'bg-green-50 border-green-200'}`}>
+                  <div className="text-xs font-bold text-gray-700 mb-3 uppercase tracking-wide">
+                    GST Calculation Breakdown
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex justify-between text-sm">
+                      <span className="text-gray-600">Taxable Value:</span>
+                      <span className="font-semibold">{formatCurrency(formData.taxable_value)}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-gray-600">GST Rate:</span>
+                      <span className="font-semibold">{formData.gst_percentage}%</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-gray-600">GST Charge Type:</span>
+                      <span className={`font-bold ${isRCM ? 'text-orange-700' : 'text-green-700'}`}>
+                        {isRCM ? 'REVERSE CHARGE (RCM)' : 'FORWARD CHARGE'}
+                      </span>
+                    </div>
+                    <div className="border-t pt-2 mt-2 space-y-1.5">
+                      {formData.gst_tax_type === 'cgst_sgst' ? (
+                        <>
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-600">CGST @ {formData.gst_percentage / 2}%:</span>
+                            <span className="font-medium">{formatCurrency(formData.cgst_amount)}</span>
+                          </div>
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-600">SGST @ {formData.gst_percentage / 2}%:</span>
+                            <span className="font-medium">{formatCurrency(formData.sgst_amount)}</span>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="flex justify-between text-sm">
+                          <span className="text-gray-600">IGST @ {formData.gst_percentage}%:</span>
+                          <span className="font-medium">{formatCurrency(formData.igst_amount)}</span>
+                        </div>
+                      )}
+                      <div className="flex justify-between text-sm font-semibold border-t pt-1.5">
+                        <span className="text-gray-700">Total GST:</span>
+                        <span className="text-gray-900">{formatCurrency(formData.gst_amount)}</span>
+                      </div>
+                    </div>
+                    {isRCM ? (
+                      <div className="mt-2 text-xs text-orange-700 bg-orange-100 rounded px-2 py-1.5">
+                        ⚠ GST Payable Under RCM by Recipient of Service — NOT included in Invoice Total
+                      </div>
+                    ) : (
+                      <div className="flex justify-between text-sm font-bold mt-2 pt-2 border-t">
+                        <span className="text-gray-800">Gross Invoice Amount:</span>
+                        <span className="text-blue-700">{formatCurrency(formData.gross_invoice_amount)}</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div>
-                  <label className={labelCls}>Extra Weight Charges (₹)</label>
-                  <input type="number" name="extra" value={formData.extra}
-                    onChange={handleNum} className={inputCls} step="0.01" min="0" />
-                </div>
-                <div>
-                  <label className={labelCls}>RTO (₹)</label>
-                  <input type="number" name="rto" value={formData.rto}
-                    onChange={handleNum} className={inputCls} step="0.01" min="0" />
-                </div>
-              </div>
+              )}
+
+              {!hasGst && (
+                <p className="text-xs text-gray-400 italic">No GST applicable (0%). Non-taxable supply.</p>
+              )}
             </div>
           </div>
 
           {/* ── Section 6: TDS / Deductions ── */}
           <div className="border border-gray-200 rounded-lg overflow-hidden">
-            <SectionHeader title="TDS Details" />
+            <SectionHeader title="Deductions (TDS, Mamool, Penalties)" />
             <div className="px-4 pb-4">
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                <div>
+                  <label className={labelCls}>TDS (₹)</label>
+                  <input type="number" name="tds" value={formData.tds}
+                    onChange={handleNum} className={inputCls} step="0.01" min="0" />
+                  <p className="text-xs text-gray-500 mt-0.5">Deducted from net payable</p>
+                </div>
                 <div>
                   <label className={labelCls}>Mamool (₹)</label>
                   <input type="number" name="mamool" value={formData.mamool}
                     onChange={handleNum} className={inputCls} step="0.01" min="0" />
                 </div>
                 <div>
-                  <label className={labelCls}>TDS (₹)</label>
-                  <input type="number" name="tds" value={formData.tds}
-                    onChange={handleNum} className={inputCls} step="0.01" min="0" />
-                </div>
-                <div>
-                  <label className={labelCls}>Penalties (₹)</label>
+                  <label className={labelCls}>Penalties / Shortage (₹)</label>
                   <input type="number" name="penalties" value={formData.penalties}
                     onChange={handleNum} className={inputCls} step="0.01" min="0" />
-                </div>
-                <div>
-                  <label className={labelCls}>Net Payable Amount</label>
-                  <input value={formatCurrency(formData.net_amount)} readOnly className={readOnlyCls} />
                 </div>
               </div>
             </div>
           </div>
 
-          {/* ── Section 7: Commission (collapsible) ── */}
+          {/* ── Section 7: Commission (separate) ── */}
           <div className="border border-yellow-200 rounded-lg overflow-hidden bg-yellow-50">
-            <SectionHeader title="Commission Section">
-            </SectionHeader>
+            <SectionHeader title="Commission Section" />
             <div className="px-4 pb-4 space-y-3">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
@@ -678,48 +913,119 @@ const BillForm: React.FC<BillFormProps> = ({ loadingSlip, selectedSlips, nextBil
           </div>
 
           {/* ── Calculation Summary ── */}
-          <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+          <div className="bg-slate-800 text-white border border-slate-700 rounded-lg p-4">
             <div className="flex items-center mb-3">
-              <Calculator className="w-4 h-4 text-green-600 mr-2" />
-              <h3 className="text-sm font-semibold text-green-900">Bill Calculation</h3>
+              <Calculator className="w-4 h-4 text-slate-300 mr-2" />
+              <h3 className="text-sm font-semibold text-white">Invoice Calculation</h3>
             </div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-              <div className="flex justify-between md:flex-col gap-1">
-                <span className="text-green-700">Freight:</span>
+            <div className="space-y-2 text-sm">
+              {/* Taxable charges */}
+              <div className="flex justify-between">
+                <span className="text-slate-400">Freight (Taxable):</span>
                 <span className="font-medium">{formatCurrency(formData.bill_amount)}</span>
               </div>
-              <div className="flex justify-between md:flex-col gap-1">
-                <span className="text-green-700">+Detention:</span>
-                <span className="font-medium">{formatCurrency(formData.detention)}</span>
+              {formData.detention > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-slate-400">
+                    + Detention {formData.detention_taxable ? '(Taxable)' : '(Non-Taxable)'}:
+                  </span>
+                  <span className="font-medium">{formatCurrency(formData.detention)}</span>
+                </div>
+              )}
+              {formData.extra > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-slate-400">
+                    + Extra {formData.extra_taxable ? '(Taxable)' : '(Non-Taxable)'}:
+                  </span>
+                  <span className="font-medium">{formatCurrency(formData.extra)}</span>
+                </div>
+              )}
+              {formData.rto > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-slate-400">
+                    + RTO {formData.rto_taxable ? '(Taxable)' : '(Non-Taxable)'}:
+                  </span>
+                  <span className="font-medium">{formatCurrency(formData.rto)}</span>
+                </div>
+              )}
+              <div className="border-t border-slate-600 pt-2 flex justify-between font-semibold">
+                <span className="text-slate-300">Taxable Value:</span>
+                <span>{formatCurrency(formData.taxable_value)}</span>
               </div>
-              <div className="flex justify-between md:flex-col gap-1">
-                <span className="text-green-700">+Extra:</span>
-                <span className="font-medium">{formatCurrency(formData.extra)}</span>
+
+              {/* GST */}
+              {hasGst && (
+                <>
+                  {formData.gst_tax_type === 'cgst_sgst' ? (
+                    <>
+                      <div className="flex justify-between text-blue-300">
+                        <span>+ CGST @ {formData.gst_percentage / 2}%:</span>
+                        <span>{formatCurrency(formData.cgst_amount)}</span>
+                      </div>
+                      <div className="flex justify-between text-blue-300">
+                        <span>+ SGST @ {formData.gst_percentage / 2}%:</span>
+                        <span>{formatCurrency(formData.sgst_amount)}</span>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="flex justify-between text-purple-300">
+                      <span>+ IGST @ {formData.gst_percentage}%:</span>
+                      <span>{formatCurrency(formData.igst_amount)}</span>
+                    </div>
+                  )}
+                  {isRCM && (
+                    <div className="text-xs text-orange-300 italic bg-orange-900/30 rounded px-2 py-1">
+                      ↑ RCM: GST shown above is for documentation only — not charged to party
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* Gross Invoice */}
+              <div className="border-t border-slate-600 pt-2 flex justify-between font-bold text-base">
+                <span className="text-green-300">Gross Invoice Amount:</span>
+                <span className="text-green-400">{formatCurrency(formData.gross_invoice_amount)}</span>
               </div>
-              <div className="flex justify-between md:flex-col gap-1">
-                <span className="text-green-700">+RTO:</span>
-                <span className="font-medium">{formatCurrency(formData.rto)}</span>
-              </div>
-              <div className="flex justify-between md:flex-col gap-1">
-                <span className="text-red-600">−Mamool:</span>
-                <span className="font-medium">{formatCurrency(formData.mamool)}</span>
-              </div>
-              <div className="flex justify-between md:flex-col gap-1">
-                <span className="text-red-600">−TDS:</span>
-                <span className="font-medium">{formatCurrency(formData.tds)}</span>
-              </div>
-              <div className="flex justify-between md:flex-col gap-1">
-                <span className="text-red-600">−Penalties:</span>
-                <span className="font-medium">{formatCurrency(formData.penalties)}</span>
-              </div>
-              <div className="flex justify-between md:flex-col gap-1">
-                <span className="text-red-600">−Commission:</span>
-                <span className="font-medium">{formatCurrency(formData.commission)}</span>
-              </div>
+
+              {/* Deductions */}
+              {(formData.tds + formData.mamool + formData.commission + formData.penalties + formData.party_commission_cut) > 0 && (
+                <>
+                  {formData.tds > 0 && (
+                    <div className="flex justify-between text-red-400">
+                      <span>− TDS:</span>
+                      <span>{formatCurrency(formData.tds)}</span>
+                    </div>
+                  )}
+                  {formData.mamool > 0 && (
+                    <div className="flex justify-between text-red-400">
+                      <span>− Mamool:</span>
+                      <span>{formatCurrency(formData.mamool)}</span>
+                    </div>
+                  )}
+                  {formData.commission > 0 && (
+                    <div className="flex justify-between text-red-400">
+                      <span>− Commission:</span>
+                      <span>{formatCurrency(formData.commission)}</span>
+                    </div>
+                  )}
+                  {formData.penalties > 0 && (
+                    <div className="flex justify-between text-red-400">
+                      <span>− Penalties:</span>
+                      <span>{formatCurrency(formData.penalties)}</span>
+                    </div>
+                  )}
+                  {formData.party_commission_cut > 0 && (
+                    <div className="flex justify-between text-red-400">
+                      <span>− Party Commission Cut:</span>
+                      <span>{formatCurrency(formData.party_commission_cut)}</span>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
-            <div className="mt-3 pt-3 border-t border-green-200 flex justify-between items-center">
-              <span className="text-sm font-semibold text-green-900">Net Payable Amount:</span>
-              <span className="text-xl font-bold text-green-800">{formatCurrency(formData.net_amount)}</span>
+            <div className="mt-3 pt-3 border-t border-slate-600 flex justify-between items-center">
+              <span className="text-sm font-semibold text-white">Net Payable Amount:</span>
+              <span className="text-2xl font-bold text-yellow-400">{formatCurrency(formData.net_amount)}</span>
             </div>
           </div>
 

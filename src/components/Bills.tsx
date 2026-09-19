@@ -91,7 +91,24 @@ const BillsComponent: React.FC<BillsListProps> = ({ showOnlyFullyReceived = fals
 
 
   const getNextBillNumber = () => {
-    return getNextSequenceNumber(bills, 'bill_number', 'BL');
+    // Format: AHD/2026-27/N
+    const now = new Date();
+    const month = now.getMonth() + 1;
+    const year = now.getFullYear();
+    const fyStart = month >= 4 ? year : year - 1;
+    const fyEnd = fyStart + 1;
+    const fy = `${fyStart}-${String(fyEnd).slice(-2)}`;
+    const prefix = `AHD/${fy}/`;
+
+    // Find highest number for current FY
+    const highest = bills.reduce((max, b) => {
+      if (b.bill_number && b.bill_number.startsWith(prefix)) {
+        const n = parseInt(b.bill_number.slice(prefix.length), 10);
+        if (!isNaN(n) && n > max) return n;
+      }
+      return max;
+    }, 0);
+    return `${prefix}${highest + 1}`;
   };
 
   const handleUpdateBill = async (billData: Omit<Bill, 'id' | 'created_at' | 'updated_at'>) => {

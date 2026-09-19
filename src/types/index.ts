@@ -220,8 +220,20 @@ export interface Bill {
   gst_type?: 'forward_charge' | 'reverse_charge' | '';
   gst_percentage?: number;
   gst_payable_by?: string;
-  gst_amount?: number;
+  gst_amount?: number;        // total GST (cgst+sgst or igst)
   total_invoice_value?: number;
+  // Extended GST breakdown (new)
+  gst_tax_type?: 'cgst_sgst' | 'igst';  // intra-state vs inter-state
+  cgst_amount?: number;       // CGST (half of GST for intra-state)
+  sgst_amount?: number;       // SGST (half of GST for intra-state)
+  igst_amount?: number;       // IGST (full GST for inter-state)
+  taxable_value?: number;     // sum of taxable charges (freight + taxable detention etc.)
+  non_taxable_amount?: number; // sum of non-taxable charges (RTO, etc.)
+  gross_invoice_amount?: number; // taxable_value + gst (forward) or taxable_value (RCM)
+  // Per-charge taxability flags
+  detention_taxable?: boolean;
+  extra_taxable?: boolean;
+  rto_taxable?: boolean;
   status: 'pending' | 'received';
   received_date?: string;
   received_amount?: number;
