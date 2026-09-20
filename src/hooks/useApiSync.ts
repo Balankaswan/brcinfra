@@ -10,26 +10,17 @@ export const useApiSync = () => {
   const syncDataRef = useRef<any>(null); // Store syncData function reference
 
   useEffect(() => {
+    // ── Debounced sync handler — defined ONCE, registered ONCE ──
+    // IMPORTANT: must NOT be inside syncData() or it accumulates duplicate listeners
+    const handleSyncEvent = () => {
+      if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
+      syncTimeoutRef.current = setTimeout(() => {
+        if (syncDataRef.current) syncDataRef.current();
+      }, 1000);
+    };
+
     const syncData = async () => {
       try {
-        // Define handleSyncEvent here so we can reference it
-        const handleSyncEvent = () => {
-          if (syncTimeoutRef.current) {
-            clearTimeout(syncTimeoutRef.current);
-          }
-          syncTimeoutRef.current = setTimeout(() => {
-            if (syncDataRef.current) {
-              syncDataRef.current();
-            }
-          }, 1000);
-        };
-
-        // Store reference to current handleSyncEvent so we can remove it later
-        (window as any).__cashbookSyncHandler = handleSyncEvent;
-
-        // Add listener for sync events from other components
-        window.addEventListener('data-sync-required', handleSyncEvent);
-
         // Fetch ALL data from API with high limits to ensure complete import
         const [
           billsResponse,
@@ -387,11 +378,12 @@ export const useApiSync = () => {
         setIsRealTimeConnected(true);
       };
 
+      // SSE uses the same debounced handler — no direct syncData() calls
       eventSource.onmessage = (event) => {
         try {
           const syncEvent = JSON.parse(event.data);
           if (syncEvent.type === 'data_change') {
-            setTimeout(() => syncData(), 500);
+            handleSyncEvent(); // debounced — collapses bursts of SSE events
           }
         } catch (error) {
           console.error('Error parsing sync event:', error);
@@ -411,22 +403,19 @@ export const useApiSync = () => {
     // Store reference to syncData so handleSyncEvent can call it
     syncDataRef.current = syncData;
 
+    // Register the data-sync-required listener ONCE (not inside syncData)
+    window.addEventListener('data-sync-required', handleSyncEvent);
+
     syncData();
     connectToRealTimeSync();
 
-    // Cleanup event listener and EventSource
+    // Cleanup — removes the single registered listener
     return () => {
       if (syncTimeoutRef.current) {
         clearTimeout(syncTimeoutRef.current);
         syncTimeoutRef.current = null;
       }
-
-      const handler = (window as any).__cashbookSyncHandler;
-      if (handler) {
-        window.removeEventListener('data-sync-required', handler);
-        delete (window as any).__cashbookSyncHandler;
-      }
-
+      window.removeEventListener('data-sync-required', handleSyncEvent);
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
         eventSourceRef.current = null;
