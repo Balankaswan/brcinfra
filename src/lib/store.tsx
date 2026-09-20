@@ -211,9 +211,18 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       if (memo.memo_number) removeDeletedMemoId(memo.memo_number);
       if (memo.id) removeDeletedMemoId(memo.id);
       if ((memo as any)._id) removeDeletedMemoId((memo as any)._id);
+      // Deduplicate by MongoDB ID ONLY — NOT by memo_number (same fix as addBill)
+      const newId = memo.id ? String(memo.id) : null;
+      const newMongoId = (memo as any)._id ? String((memo as any)._id) : null;
       setMemos(prev => [
         memo,
-        ...prev.filter(m => m.id !== memo.id && (m as any)._id !== (memo as any)._id && m.memo_number !== memo.memo_number)
+        ...prev.filter(m => {
+          const mId = m.id ? String(m.id) : null;
+          const mMongoId = (m as any)._id ? String((m as any)._id) : null;
+          const sameById = (mId && newId && mId === newId) || (mMongoId && newMongoId && mMongoId === newMongoId);
+          const crossMatch = (mId && newMongoId && mId === newMongoId) || (mMongoId && newId && mMongoId === newId);
+          return !(sameById || crossMatch);
+        })
       ]);
       const linkedIds = memo.loading_slip_ids && memo.loading_slip_ids.length > 0
         ? memo.loading_slip_ids
@@ -282,9 +291,21 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       if (bill.bill_number) removeDeletedBillId(bill.bill_number);
       if (bill.id) removeDeletedBillId(bill.id);
       if ((bill as any)._id) removeDeletedBillId((bill as any)._id);
+      // Deduplicate by MongoDB ID ONLY — NOT by bill_number.
+      // Filtering by bill_number caused old bills to silently disappear when a new bill
+      // accidentally got the same number due to stale React state in getNextBillNumber().
+      const newId = bill.id ? String(bill.id) : null;
+      const newMongoId = (bill as any)._id ? String((bill as any)._id) : null;
       setBills(prev => [
         bill,
-        ...prev.filter(b => b.id !== bill.id && (b as any)._id !== (bill as any)._id && b.bill_number !== bill.bill_number)
+        ...prev.filter(b => {
+          const bId = b.id ? String(b.id) : null;
+          const bMongoId = (b as any)._id ? String((b as any)._id) : null;
+          // Remove only if the IDs actually match (same MongoDB document)
+          const sameById = (bId && newId && bId === newId) || (bMongoId && newMongoId && bMongoId === newMongoId);
+          const crossMatch = (bId && newMongoId && bId === newMongoId) || (bMongoId && newId && bMongoId === newId);
+          return !(sameById || crossMatch);
+        })
       ]);
     },
     updateBill: (bill) => {

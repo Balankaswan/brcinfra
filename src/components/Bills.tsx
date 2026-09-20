@@ -101,8 +101,18 @@ const BillsComponent: React.FC<BillsListProps> = ({ showOnlyFullyReceived = fals
     const fy = `${fyStart}-${String(fyEnd).slice(-2)}`;
     const prefix = `AHD/${fy}/`;
 
-    // Find highest number for current FY
-    const highest = bills.reduce((max, b) => {
+    // Read from BOTH React state and localStorage — use whichever has the higher number.
+    // React state can be momentarily stale (e.g. during initial sync or concurrent updates),
+    // causing a duplicate bill number that would then silently delete the old bill.
+    let allBills: any[] = [...bills];
+    try {
+      const lsBills: any[] = JSON.parse(localStorage.getItem('brc_bills') || '[]');
+      // Merge: add any localStorage bills not already in state (by bill_number)
+      const stateNos = new Set(bills.map(b => b.bill_number));
+      lsBills.forEach(b => { if (b.bill_number && !stateNos.has(b.bill_number)) allBills.push(b); });
+    } catch (e) {}
+
+    const highest = allBills.reduce((max, b) => {
       if (b.bill_number && b.bill_number.startsWith(prefix)) {
         const n = parseInt(b.bill_number.slice(prefix.length), 10);
         if (!isNaN(n) && n > max) return n;
