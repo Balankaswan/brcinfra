@@ -71,202 +71,166 @@ export const useApiSync = () => {
           } catch { return new Set(); }
         };
 
-        const deletedBills = getDeletedBills();
-        const deletedMemos = getDeletedMemos();
+        // ── Read current state directly from localStorage (AVOIDS stale closure) ──
+        // store.bills / store.memos inside this useEffect closure are the mount-time
+        // values and never update. Reading localStorage directly is always current.
+        const readLocalBills = (): any[] => {
+          try { return JSON.parse(localStorage.getItem('brc_bills') || '[]'); } catch { return []; }
+        };
+        const readLocalMemos = (): any[] => {
+          try { return JSON.parse(localStorage.getItem('brc_memos') || '[]'); } catch { return []; }
+        };
+        const readLocalSlips = (): any[] => {
+          try { return JSON.parse(localStorage.getItem('brc_loading_slips') || '[]'); } catch { return []; }
+        };
 
-        // ── BILLS SYNC ──
+        // ── BILLS SYNC ── (localStorage-first: avoids stale closure, always merges)
         if (billsResponse.status === 'fulfilled') {
-          const rawFetchedBills = billsResponse.value.bills || [];
-          const fetchedBills = rawFetchedBills.filter((b: any) => {
-            const id = b.id ? String(b.id).trim().toUpperCase() : null;
-            const mongoId = b._id ? String(b._id).trim().toUpperCase() : null;
-            const billNo = b.bill_number ? String(b.bill_number).trim().toUpperCase() : null;
-            if (id && deletedBills.has(id)) return false;
-            if (mongoId && deletedBills.has(mongoId)) return false;
-            if (billNo && deletedBills.has(billNo)) return false;
-            return true;
-          });
-          const currentBills = store.bills.filter(b => {
-            const id = b.id ? String(b.id).trim().toUpperCase() : null;
-            const mongoId = (b as any)._id ? String((b as any)._id).trim().toUpperCase() : null;
-            const billNo = b.bill_number ? String(b.bill_number).trim().toUpperCase() : null;
-            if (id && deletedBills.has(id)) return false;
-            if (mongoId && deletedBills.has(mongoId)) return false;
-            if (billNo && deletedBills.has(billNo)) return false;
-            return true;
-          });
+          const deletedBills = getDeletedBills();
+          const rawFetchedBills: any[] = billsResponse.value.bills || [];
+          // Always read from localStorage — store.bills inside this closure is stale
+          const localBills = readLocalBills();
 
-          if (fetchedBills.length === 0 && currentBills.length > 0) {
-            console.log('[Sync] Backend returned 0 bills, preserving local state');
+          if (rawFetchedBills.length === 0 && localBills.length > 0) {
+            console.log('[Sync] Backend returned 0 bills — preserving local state');
           } else {
-            const recentBillCreation = localStorage.getItem('lastBillCreation');
-            const isRecentCreation = recentBillCreation && (Date.now() - parseInt(recentBillCreation)) < 30000;
-
+            // Build backend lookup
             const backendBillMap = new Map<string, any>();
-            fetchedBills.forEach((bill: any) => {
-              const id = bill.id || (bill as any)._id;
-              const billNo = bill.bill_number ? bill.bill_number.trim().toUpperCase() : null;
-              const normalized = { ...bill, id: id || billNo };
-              if (billNo) backendBillMap.set(billNo, normalized);
+            rawFetchedBills.forEach((b: any) => {
+              const id = b.id || b._id;
+              const billNo = b.bill_number ? b.bill_number.trim().toUpperCase() : null;
+              const normalized = { ...b, id: id || billNo };
               if (id) backendBillMap.set(String(id), normalized);
+              if (billNo) backendBillMap.set(billNo, normalized);
             });
 
-            let completeBills = Array.from(
-              new Map(fetchedBills.map((b: any) => {
-                const key = b.bill_number ? b.bill_number.trim().toUpperCase() : (b.id || (b as any)._id);
-                return [key, { ...b, id: b.id || (b as any)._id || b.bill_number }];
-              })).values()
-            );
-
-            if (isRecentCreation) {
-              currentBills.forEach(bill => {
-                const billNo = bill.bill_number ? bill.bill_number.trim().toUpperCase() : null;
-                const id = bill.id || (bill as any)._id;
-                const inBackend = (billNo && backendBillMap.has(billNo)) || (id && backendBillMap.has(String(id)));
-                if (!inBackend) {
-                  completeBills.push(bill);
-                }
-              });
-            }
-
-            completeBills.sort((a, b) => {
-              const dateA = new Date(a.created_at || a.date || 0).getTime();
-              const dateB = new Date(b.created_at || b.date || 0).getTime();
-              return dateB - dateA;
+            // Start with backend as base
+            const mergedMap = new Map<string, any>();
+            rawFetchedBills.forEach((b: any) => {
+              const key = b.bill_number ? b.bill_number.trim().toUpperCase() : (b.id || b._id);
+              if (key) mergedMap.set(String(key), { ...b, id: b.id || b._id || b.bill_number });
             });
 
-            store.setBills(completeBills);
+            // Preserve local-only bills (created, not yet confirmed by backend)
+            localBills.forEach((b: any) => {
+              const id = b.id ? String(b.id).trim().toUpperCase() : null;
+              const mongoId = (b as any)._id ? String((b as any)._id).trim().toUpperCase() : null;
+              const billNo = b.bill_number ? String(b.bill_number).trim().toUpperCase() : null;
+              if ((id && deletedBills.has(id)) || (mongoId && deletedBills.has(mongoId)) || (billNo && deletedBills.has(billNo || ''))) return;
+              const inBackend = (id && backendBillMap.has(id)) || (mongoId && backendBillMap.has(mongoId)) || (billNo && backendBillMap.has(billNo || ''));
+              if (!inBackend) {
+                const key = billNo || id || mongoId;
+                if (key && !mergedMap.has(key)) mergedMap.set(key, b);
+              }
+            });
+
+            const finalBills = Array.from(mergedMap.values()).filter((b: any) => {
+              const id = b.id ? String(b.id).trim().toUpperCase() : null;
+              const mongoId = (b as any)._id ? String((b as any)._id).trim().toUpperCase() : null;
+              const billNo = b.bill_number ? String(b.bill_number).trim().toUpperCase() : null;
+              return !((id && deletedBills.has(id)) || (mongoId && deletedBills.has(mongoId)) || (billNo && deletedBills.has(billNo || '')));
+            });
+
+            finalBills.sort((a, b) => new Date(b.created_at || b.date || 0).getTime() - new Date(a.created_at || a.date || 0).getTime());
+            store.setBills(finalBills);
           }
         }
 
 
-        // ── MEMOS SYNC ──
+        // ── MEMOS SYNC ── (localStorage-first: avoids stale closure, always merges)
         if (memosResponse.status === 'fulfilled') {
-          const rawFetchedMemos = memosResponse.value.memos || [];
-          const fetchedMemos = rawFetchedMemos.filter((m: any) => {
-            const id = m.id ? String(m.id).trim().toUpperCase() : null;
-            const mongoId = m._id ? String(m._id).trim().toUpperCase() : null;
-            const memoNo = m.memo_number ? String(m.memo_number).trim().toUpperCase() : null;
-            if (id && deletedMemos.has(id)) return false;
-            if (mongoId && deletedMemos.has(mongoId)) return false;
-            if (memoNo && deletedMemos.has(memoNo)) return false;
-            return true;
-          });
-          const currentMemos = store.memos.filter(m => {
-            const id = m.id ? String(m.id).trim().toUpperCase() : null;
-            const mongoId = (m as any)._id ? String((m as any)._id).trim().toUpperCase() : null;
-            const memoNo = m.memo_number ? String(m.memo_number).trim().toUpperCase() : null;
-            if (id && deletedMemos.has(id)) return false;
-            if (mongoId && deletedMemos.has(mongoId)) return false;
-            if (memoNo && deletedMemos.has(memoNo)) return false;
-            return true;
-          });
+          const deletedMemos = getDeletedMemos();
+          const rawFetchedMemos: any[] = memosResponse.value.memos || [];
+          const localMemos = readLocalMemos();
 
-          if (fetchedMemos.length === 0 && currentMemos.length > 0) {
-            console.log('[Sync] Backend returned 0 memos, preserving local state');
+          if (rawFetchedMemos.length === 0 && localMemos.length > 0) {
+            console.log('[Sync] Backend returned 0 memos — preserving local state');
           } else {
-            const recentMemoCreation = localStorage.getItem('lastMemoCreation');
-            const isRecentCreation = recentMemoCreation && (Date.now() - parseInt(recentMemoCreation)) < 30000;
-
             const backendMemoMap = new Map<string, any>();
-            fetchedMemos.forEach((memo: any) => {
-              const id = memo.id || (memo as any)._id;
-              const memoNo = memo.memo_number ? memo.memo_number.trim().toUpperCase() : null;
-              if (memoNo) backendMemoMap.set(memoNo, memo);
-              if (id) backendMemoMap.set(String(id), memo);
+            rawFetchedMemos.forEach((m: any) => {
+              const id = m.id || m._id;
+              const memoNo = m.memo_number ? m.memo_number.trim().toUpperCase() : null;
+              if (id) backendMemoMap.set(String(id), m);
+              if (memoNo) backendMemoMap.set(memoNo, m);
             });
 
-            let completeMemos = Array.from(
-              new Map(fetchedMemos.map((m: any) => {
-                const key = m.memo_number ? m.memo_number.trim().toUpperCase() : (m.id || (m as any)._id);
-                return [key, { ...m, id: m.id || (m as any)._id || m.memo_number }];
-              })).values()
-            );
-
-            if (isRecentCreation) {
-              currentMemos.forEach(memo => {
-                const memoNo = memo.memo_number ? memo.memo_number.trim().toUpperCase() : null;
-                const id = memo.id || (memo as any)._id;
-                const inBackend = (memoNo && backendMemoMap.has(memoNo)) || (id && backendMemoMap.has(String(id)));
-                if (!inBackend) {
-                  completeMemos.push(memo);
-                }
-              });
-            }
-
-            completeMemos.sort((a, b) => {
-              const dateA = new Date(a.created_at || a.date || 0).getTime();
-              const dateB = new Date(b.created_at || b.date || 0).getTime();
-              return dateB - dateA;
+            const mergedMap = new Map<string, any>();
+            rawFetchedMemos.forEach((m: any) => {
+              const key = m.memo_number ? m.memo_number.trim().toUpperCase() : (m.id || m._id);
+              if (key) mergedMap.set(String(key), { ...m, id: m.id || m._id || m.memo_number });
             });
 
-            store.setMemos(completeMemos);
+            localMemos.forEach((m: any) => {
+              const id = m.id ? String(m.id).trim().toUpperCase() : null;
+              const mongoId = (m as any)._id ? String((m as any)._id).trim().toUpperCase() : null;
+              const memoNo = m.memo_number ? String(m.memo_number).trim().toUpperCase() : null;
+              if ((id && deletedMemos.has(id)) || (mongoId && deletedMemos.has(mongoId)) || (memoNo && deletedMemos.has(memoNo || ''))) return;
+              const inBackend = (id && backendMemoMap.has(id)) || (mongoId && backendMemoMap.has(mongoId)) || (memoNo && backendMemoMap.has(memoNo || ''));
+              if (!inBackend) {
+                const key = memoNo || id || mongoId;
+                if (key && !mergedMap.has(key)) mergedMap.set(key, m);
+              }
+            });
+
+            const finalMemos = Array.from(mergedMap.values()).filter((m: any) => {
+              const id = m.id ? String(m.id).trim().toUpperCase() : null;
+              const mongoId = (m as any)._id ? String((m as any)._id).trim().toUpperCase() : null;
+              const memoNo = m.memo_number ? String(m.memo_number).trim().toUpperCase() : null;
+              return !((id && deletedMemos.has(id)) || (mongoId && deletedMemos.has(mongoId)) || (memoNo && deletedMemos.has(memoNo || '')));
+            });
+
+            finalMemos.sort((a, b) => new Date(b.created_at || b.date || 0).getTime() - new Date(a.created_at || a.date || 0).getTime());
+            store.setMemos(finalMemos);
           }
         }
 
 
-        // BULLETPROOF LOADING SLIPS IMPORT AND SYNC
+        // LOADING SLIPS SYNC (localStorage-first: avoids stale closure, always merges)
         if (loadingSlipsResponse.status === 'fulfilled') {
           const fetchedSlips = loadingSlipsResponse.value.loadingSlips || [];
-          const currentSlips = store.loadingSlips;
+          const localSlips = readLocalSlips();
 
-          // SAFETY GUARD: If backend returns 0 LRs but we have local data, preserve it
-          if (fetchedSlips.length === 0 && currentSlips.length > 0) {
-            console.log('[Sync] Backend returned 0 LRs but local has', currentSlips.length, '— preserving local state');
+          if (fetchedSlips.length === 0 && localSlips.length > 0) {
+            console.log('[Sync] Backend returned 0 LRs but local has', localSlips.length, '— preserving local state');
           } else {
-            const recentSlipCreation = localStorage.getItem('lastLoadingSlipCreation');
-            // 30s guard for LRs
-            const isRecentSlipCreation = recentSlipCreation && (Date.now() - parseInt(recentSlipCreation)) < 30000;
-
-            const slipMap = new Map<string, any>();
+            const backendSlipMap = new Map<string, any>();
             const seenNumbers = new Set<string>();
 
-            fetchedSlips.forEach(fetchedSlip => {
-              const id = fetchedSlip.id || (fetchedSlip as any)._id;
-              const slipNo = fetchedSlip.slip_number || fetchedSlip.lr_number;
-              const normalized = {
-                ...fetchedSlip,
-                id: id || (fetchedSlip as any)._id || slipNo
-              };
-              if (id) slipMap.set(String(id), normalized);
-              if ((fetchedSlip as any)._id) slipMap.set(String((fetchedSlip as any)._id), normalized);
+            fetchedSlips.forEach((s: any) => {
+              const id = s.id || (s as any)._id;
+              const slipNo = (s.slip_number || s.lr_number) ? String(s.slip_number || s.lr_number).trim().toUpperCase() : '';
+              const normalized = { ...s, id: id || (s as any)._id || slipNo };
+              if (id) backendSlipMap.set(String(id), normalized);
+              if ((s as any)._id) backendSlipMap.set(String((s as any)._id), normalized);
               if (slipNo) {
-                slipMap.set(`num:${String(slipNo).trim().toUpperCase()}`, normalized);
-                seenNumbers.add(String(slipNo).trim().toUpperCase());
+                backendSlipMap.set(`num:${slipNo}`, normalized);
+                seenNumbers.add(slipNo);
               }
             });
 
-            if (isRecentSlipCreation) {
-              currentSlips.forEach(slip => {
-                const id = slip.id || (slip as any)._id;
-                const slipNo = (slip.slip_number || slip.lr_number) ? String(slip.slip_number || slip.lr_number).trim().toUpperCase() : '';
+            // Unique by primary id/slipNo
+            const mergedMap = new Map<string, any>();
+            fetchedSlips.forEach((s: any) => {
+              const id = s.id || (s as any)._id;
+              const slipNo = s.slip_number || s.lr_number;
+              const key = id ? String(id) : (slipNo ? String(slipNo) : '');
+              if (key && !mergedMap.has(key)) mergedMap.set(key, { ...s, id: id || slipNo });
+            });
 
-                const isAlreadyInBackend = (id && slipMap.has(String(id))) || (slipNo && seenNumbers.has(slipNo));
-                const isMongoId = id && String(id).match(/^[0-9a-fA-F]{24}$/);
-
-                if (!isAlreadyInBackend && !isMongoId) {
-                  if (slipNo) {
-                    slipMap.set(`num:${slipNo}`, slip);
-                    seenNumbers.add(slipNo);
-                  } else if (id) {
-                    slipMap.set(String(id), slip);
-                  }
-                }
-              });
-            }
-
-            const uniqueSlipsMap = new Map<string, any>();
-            slipMap.forEach((slip) => {
-              const key = slip.id || (slip as any)._id || slip.slip_number || slip.lr_number;
-              if (key && !uniqueSlipsMap.has(String(key))) {
-                uniqueSlipsMap.set(String(key), slip);
+            // Add local-only slips not yet in backend
+            localSlips.forEach((slip: any) => {
+              const id = slip.id || (slip as any)._id;
+              const slipNo = (slip.slip_number || slip.lr_number) ? String(slip.slip_number || slip.lr_number).trim().toUpperCase() : '';
+              const isMongoId = id && String(id).match(/^[0-9a-fA-F]{24}$/);
+              const inBackend = (id && backendSlipMap.has(String(id))) || (slipNo && seenNumbers.has(slipNo));
+              if (!inBackend && !isMongoId) {
+                const key = id ? String(id) : (slipNo || '');
+                if (key && !mergedMap.has(key)) mergedMap.set(key, slip);
               }
             });
 
-            const completeSlips = Array.from(uniqueSlipsMap.values()).sort((a, b) => {
-              const dateA = new Date(a.created_at || a.date || 0).getTime();
-              const dateB = new Date(b.created_at || b.date || 0).getTime();
-              return dateB - dateA;
+            const completeSlips = Array.from(mergedMap.values()).sort((a, b) => {
+              return new Date(b.created_at || b.date || 0).getTime() - new Date(a.created_at || a.date || 0).getTime();
             });
 
             store.setLoadingSlips(completeSlips);
