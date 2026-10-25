@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import MonthFilterDropdown from './MonthFilterDropdown';
-import { TrendingUp, Users, Truck, DollarSign, FileText, Receipt, FileDown, Table, ShieldAlert, CheckCircle, X, ChevronDown, ChevronUp } from 'lucide-react';
+import { TrendingUp, Users, Truck, DollarSign, FileText, Receipt, FileDown, Table, ShieldAlert, CheckCircle, X, ChevronDown, ChevronUp, Filter } from 'lucide-react';
 import { formatCurrency } from '../utils/numberGenerator';
 import { useDataStore } from '../lib/store';
 import { getExpiryStatus } from './VehicleDocumentModal';
@@ -76,6 +76,10 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
 
   // Modal state
   const [showProfitModal, setShowProfitModal] = useState(false);
+
+  // Balance filter state: 'unpaid' (default), 'paid', 'all'
+  const [supplierBalanceFilter, setSupplierBalanceFilter] = useState<'unpaid' | 'paid' | 'all'>('unpaid');
+  const [partyBalanceFilter, setPartyBalanceFilter] = useState<'unpaid' | 'paid' | 'all'>('unpaid');
 
   // Calculate actual profit: Bill Net Amount (excluding TDS and Party Commission Cut) - Memo Net Amount
   const totalProfit = useMemo(() => {
@@ -172,12 +176,18 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
     return rows;
   }, [filteredBills, filteredMemos, loadingSlips]);
 
-  // Calculate party balance (bills due from parties) - OVERALL, not filtered by month
-  const partyBalance = useMemo(() => {
-    const balance = bills
-      .filter(bill => bill.status !== 'received') // Exclude paid/received bills
-      .reduce((sum, bill) => {
-      // Calculate total bill amount (what party owes)
+  // ─── Helper: compute party balance for a given status filter ───────────
+  const computePartyBalance = (statusFilter: 'unpaid' | 'paid' | 'all') => {
+    const filteredBillsByStatus = statusFilter === 'all'
+      ? bills
+      : statusFilter === 'paid'
+        ? bills.filter(bill => bill.status === 'received')
+        : bills.filter(bill => bill.status !== 'received');
+
+    // Sort latest first
+    const sortedBills = [...filteredBillsByStatus].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+    const balance = sortedBills.reduce((sum, bill) => {
       const billAmount = bill.bill_amount || 0;
       const detention = bill.detention || 0;
       const extra = bill.extra || 0;
@@ -186,37 +196,23 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       const tds = bill.tds || 0;
       const penalties = bill.penalties || 0;
 
-      // Net amount party owes = Bill Amount + Extras - Deductions
       const partyOwes = billAmount + detention + extra + rto - mamool - tds - penalties;
 
-      // Find all payments for this bill from banking entries
       const bankingPayments = bankingEntries
-        .filter(entry => {
-          const matchesReference = entry.reference_id === bill.bill_number;
-          const isCredit = entry.type === 'credit';
-          return matchesReference && isCredit;
-        })
+        .filter(entry => entry.reference_id === bill.bill_number && entry.type === 'credit')
         .reduce((total, entry) => total + entry.amount, 0);
 
-      // Find all payments for this bill from cashbook entries
       const cashbookPayments = cashbookEntries
-        .filter(entry => {
-          const matchesReference = entry.reference_id === bill.bill_number;
-          const isCredit = entry.type === 'credit';
-          return matchesReference && isCredit;
-        })
+        .filter(entry => entry.reference_id === bill.bill_number && entry.type === 'credit')
         .reduce((total, entry) => total + entry.amount, 0);
 
       const billPayments = bankingPayments + cashbookPayments;
       const billBalance = partyOwes - billPayments;
-
-      // Only include positive balances (pending amounts)
       const pendingAmount = Math.max(0, billBalance);
 
       return sum + pendingAmount;
     }, 0);
 
-    // Subtract party on account payments from total balance
     const partyOnAccountPayments = bankingEntries
       .filter(entry => entry.type === 'credit' && entry.category === 'party_on_account')
       .reduce((sum, entry) => sum + entry.amount, 0);
@@ -225,23 +221,45 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       .filter(entry => entry.type === 'credit' && entry.category === 'party_on_account')
       .reduce((sum, entry) => sum + entry.amount, 0);
 
-    // Subtract party debit notes from total balance (debit notes reduce what party owes us)
     const partyDebitNotes = bankingEntries
       .filter(entry => entry.type === 'credit' && entry.category === 'party_debit_note')
       .reduce((sum, entry) => sum + entry.amount, 0);
 
     const totalOnAccountPayments = partyOnAccountPayments + partyOnAccountCashPayments;
     const totalDebitNotes = partyDebitNotes;
-    const finalBalance = Math.max(0, balance - totalOnAccountPayments - totalDebitNotes);
 
-    return finalBalance;
-  }, [bills, bankingEntries, cashbookEntries]);
+    // For 'paid' filter, show the total paid amount (sum of payments) rather than balance
+    if (statusFilter === 'paid') {
+      const totalPaid = sortedBills.reduce((sum, bill) => {
+        const bankingPay = bankingEntries
+          .filter(entry => entry.reference_id === bill.bill_number && entry.type === 'credit')
+          .reduce((total, entry) => total + entry.amount, 0);
+        const cashPay = cashbookEntries
+          .filter(entry => entry.reference_id === bill.bill_number && entry.type === 'credit')
+          .reduce((total, entry) => total + entry.amount, 0);
+        return sum + bankingPay + cashPay;
+      }, 0) + totalOnAccountPayments + totalDebitNotes;
+      return totalPaid;
+    }
 
-  // Calculate supplier balance (memos due to suppliers - EXCLUDING own vehicles) - OVERALL, not filtered by month
-  const supplierBalance = useMemo(() => {
-    const balance = memos
-      .filter(memo => memo.status !== 'paid') // Exclude memos explicitly marked as paid
-      .reduce((sum, memo) => {
+    return Math.max(0, balance - totalOnAccountPayments - totalDebitNotes);
+  };
+
+  // Calculate party balance based on filter - OVERALL, not filtered by month
+  const partyBalance = useMemo(() => computePartyBalance(partyBalanceFilter), [bills, bankingEntries, cashbookEntries, partyBalanceFilter]);
+
+  // ─── Helper: compute supplier balance for a given status filter ────────
+  const computeSupplierBalance = (statusFilter: 'unpaid' | 'paid' | 'all') => {
+    const filteredMemosByStatus = statusFilter === 'all'
+      ? memos
+      : statusFilter === 'paid'
+        ? memos.filter(memo => memo.status === 'paid')
+        : memos.filter(memo => memo.status !== 'paid');
+
+    // Sort latest first
+    const sortedMemos = [...filteredMemosByStatus].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+    const balance = sortedMemos.reduce((sum, memo) => {
         let loadingSlipId: string | undefined;
         if (typeof memo.loading_slip_id === 'string') {
           loadingSlipId = memo.loading_slip_id;
@@ -249,7 +267,6 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
           loadingSlipId = (memo.loading_slip_id as any)._id || (memo.loading_slip_id as any).id;
         }
 
-        // Find loading slip and vehicle to check if explicitly an OWN vehicle
         const ls = loadingSlipId
           ? loadingSlips.find(s => s.id === loadingSlipId || (s as any)._id === loadingSlipId || String((s as any)._id) === String(loadingSlipId))
           : undefined;
@@ -260,7 +277,6 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
         // Skip ONLY if explicitly marked as an own vehicle
         if (vehicle && vehicle.ownership_type === 'own') return sum;
 
-        // Payments from banking and cashbook for this memo
         const bankingPayments = bankingEntries
           .filter(entry => entry.reference_id === memo.memo_number && entry.type === 'debit')
           .reduce((total, entry) => total + entry.amount, 0);
@@ -269,7 +285,6 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
           .filter(entry => entry.reference_id === memo.memo_number && entry.type === 'debit')
           .reduce((total, entry) => total + entry.amount, 0);
 
-        // Include fuel / extra advances logged on memo object
         const fuelAdvances = (memo.advance_payments || []).reduce((advSum, a) => advSum + (a.amount || 0), 0);
 
         const memoPayments = bankingPayments + cashbookPayments + fuelAdvances;
@@ -278,7 +293,6 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
         return sum + memoBalance;
       }, 0);
 
-    // Subtract supplier on account payments from total balance
     const supplierOnAccountPayments = bankingEntries
       .filter(entry => entry.type === 'debit' && (entry.category as any) === 'supplier_on_account')
       .reduce((sum, entry) => sum + entry.amount, 0);
@@ -287,17 +301,46 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       .filter(entry => entry.type === 'debit' && entry.category === 'supplier_on_account')
       .reduce((sum, entry) => sum + entry.amount, 0);
 
-    // Subtract supplier debit notes from total balance (debit notes reduce what we owe suppliers)
     const supplierDebitNotes = bankingEntries
       .filter(entry => entry.type === 'credit' && (entry.category as any) === 'supplier_debit_note')
       .reduce((sum, entry) => sum + entry.amount, 0);
 
     const totalSupplierOnAccountPayments = supplierOnAccountPayments + supplierOnAccountCashPayments;
     const totalSupplierDebitNotes = supplierDebitNotes;
-    const finalSupplierBalance = Math.max(0, balance - totalSupplierOnAccountPayments - totalSupplierDebitNotes);
 
-    return finalSupplierBalance;
-  }, [memos, loadingSlips, vehicles, bankingEntries, cashbookEntries]);
+    // For 'paid' filter, show total paid amounts
+    if (statusFilter === 'paid') {
+      const totalPaid = sortedMemos.reduce((sum, memo) => {
+        let loadingSlipId: string | undefined;
+        if (typeof memo.loading_slip_id === 'string') {
+          loadingSlipId = memo.loading_slip_id;
+        } else if (memo.loading_slip_id && typeof memo.loading_slip_id === 'object') {
+          loadingSlipId = (memo.loading_slip_id as any)._id || (memo.loading_slip_id as any).id;
+        }
+        const ls = loadingSlipId
+          ? loadingSlips.find(s => s.id === loadingSlipId || (s as any)._id === loadingSlipId || String((s as any)._id) === String(loadingSlipId))
+          : undefined;
+        const vehicleNo = ls?.vehicle_no || memo.vehicle_no;
+        const vehicle = vehicleNo ? vehicles.find(v => v.vehicle_no?.trim().toUpperCase() === vehicleNo.trim().toUpperCase()) : undefined;
+        if (vehicle && vehicle.ownership_type === 'own') return sum;
+
+        const bankingPay = bankingEntries
+          .filter(entry => entry.reference_id === memo.memo_number && entry.type === 'debit')
+          .reduce((total, entry) => total + entry.amount, 0);
+        const cashPay = cashbookEntries
+          .filter(entry => entry.reference_id === memo.memo_number && entry.type === 'debit')
+          .reduce((total, entry) => total + entry.amount, 0);
+        const fuelAdv = (memo.advance_payments || []).reduce((advSum, a) => advSum + (a.amount || 0), 0);
+        return sum + bankingPay + cashPay + fuelAdv;
+      }, 0) + totalSupplierOnAccountPayments + totalSupplierDebitNotes;
+      return totalPaid;
+    }
+
+    return Math.max(0, balance - totalSupplierOnAccountPayments - totalSupplierDebitNotes);
+  };
+
+  // Calculate supplier balance based on filter (excluding own vehicles) - OVERALL, not filtered by month
+  const supplierBalance = useMemo(() => computeSupplierBalance(supplierBalanceFilter), [memos, loadingSlips, vehicles, bankingEntries, cashbookEntries, supplierBalanceFilter]);
 
   // ─── Compute full per-party ledger summaries for PDF/Excel export ─────
   const allPartyLedgerSummaries = useMemo((): PartyLedgerSummary[] => {
@@ -492,6 +535,9 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
     return filteredBills.reduce((sum, bill) => sum + bill.bill_amount, 0);
   }, [filteredBills]);
 
+  // Filter label helper
+  const filterLabel = (f: 'unpaid' | 'paid' | 'all') => f === 'unpaid' ? 'Unpaid' : f === 'paid' ? 'Paid' : 'All';
+
   const stats = [
     {
       title: 'Total Profit (Bill - Memo)',
@@ -501,24 +547,27 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       iconBg: totalProfit >= 0 ? 'bg-green-100' : 'bg-red-100',
       clickable: true,
       onClick: () => setShowProfitModal(true),
+      filterType: null as null,
     },
     {
-      title: 'Party Balance',
+      title: `Party Balance (${filterLabel(partyBalanceFilter)})`,
       value: formatCurrency(partyBalance),
       icon: Users,
       color: 'bg-blue-50 text-blue-700',
       iconBg: 'bg-blue-100',
       clickable: true,
       onClick: () => onNavigate?.('parties'),
+      filterType: 'party' as const,
     },
     {
-      title: 'Supplier Balance',
+      title: `Supplier Balance (${filterLabel(supplierBalanceFilter)})`,
       value: formatCurrency(supplierBalance),
       icon: Truck,
       color: 'bg-orange-50 text-orange-700',
       iconBg: 'bg-orange-100',
       clickable: true,
       onClick: () => onNavigate?.('suppliers'),
+      filterType: 'supplier' as const,
     },
     {
       title: selectedMonths.length === 0 ? 'Total Revenue' : selectedMonths.length === 1 ? 'Monthly Revenue' : 'Multi-Month Revenue',
@@ -528,6 +577,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       iconBg: 'bg-purple-100',
       clickable: false,
       onClick: undefined,
+      filterType: null as null,
     },
   ];
 
@@ -566,9 +616,11 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {stats.map((stat, index) => {
           const Icon = stat.icon;
+          const currentFilter = stat.filterType === 'party' ? partyBalanceFilter : stat.filterType === 'supplier' ? supplierBalanceFilter : null;
+          const setFilter = stat.filterType === 'party' ? setPartyBalanceFilter : stat.filterType === 'supplier' ? setSupplierBalanceFilter : null;
           return (
             <div
-              key={`stat-${stat.title}-${index}`}
+              key={`stat-${stat.filterType || stat.title}-${index}`}
               className={`bg-white rounded-xl shadow-sm border border-gray-200 p-6 transition-all duration-200 ${
                 stat.clickable
                   ? 'cursor-pointer hover:shadow-md hover:border-blue-300 hover:scale-[1.02]'
@@ -577,14 +629,40 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
               onClick={stat.onClick}
             >
               <div className="flex items-center justify-between">
-                <div>
+                <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-gray-600">{stat.title}</p>
                   <p className="text-2xl font-bold text-gray-900 mt-2">{stat.value}</p>
-                  {stat.clickable && (
+                  {/* Filter buttons for Party & Supplier Balance */}
+                  {stat.filterType && setFilter && (
+                    <div className="flex items-center gap-1 mt-2" onClick={e => e.stopPropagation()}>
+                      <Filter className="w-3 h-3 text-gray-400 flex-shrink-0" />
+                      {(['unpaid', 'paid', 'all'] as const).map(f => (
+                        <button
+                          key={f}
+                          onClick={(e) => { e.stopPropagation(); setFilter(f); }}
+                          className={`px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                            currentFilter === f
+                              ? f === 'unpaid'
+                                ? 'bg-yellow-500 text-white shadow-sm'
+                                : f === 'paid'
+                                  ? 'bg-green-500 text-white shadow-sm'
+                                  : 'bg-blue-500 text-white shadow-sm'
+                              : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                          }`}
+                        >
+                          {f === 'unpaid' ? 'Unpaid' : f === 'paid' ? 'Paid' : 'All'}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {stat.clickable && !stat.filterType && (
+                    <p className="text-xs text-blue-600 mt-1">Click to view details →</p>
+                  )}
+                  {stat.clickable && stat.filterType && (
                     <p className="text-xs text-blue-600 mt-1">Click to view details →</p>
                   )}
                 </div>
-                <div className={`w-12 h-12 rounded-lg ${stat.iconBg} flex items-center justify-center`}>
+                <div className={`w-12 h-12 rounded-lg ${stat.iconBg} flex items-center justify-center flex-shrink-0`}>
                   <Icon className={`w-6 h-6 ${stat.color.split(' ')[1]}`} />
                 </div>
               </div>
