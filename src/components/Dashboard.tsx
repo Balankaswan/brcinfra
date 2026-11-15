@@ -195,8 +195,9 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
       const mamool = bill.mamool || 0;
       const tds = bill.tds || 0;
       const penalties = bill.penalties || 0;
+      const grossInvoice = bill.gross_invoice_amount || bill.net_amount || (billAmount + (bill.gst_amount || 0));
 
-      const partyOwes = billAmount + detention + extra + rto - mamool - tds - penalties;
+      const partyOwes = grossInvoice + detention + extra + rto - mamool - tds - penalties;
 
       const bankingPayments = bankingEntries
         .filter(entry => entry.reference_id === bill.bill_number && entry.type === 'credit')
@@ -530,9 +531,12 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
     }
   };
 
-  // Calculate monthly revenue (total bill amounts)
+  // Calculate monthly revenue (total gross invoice amounts with GST)
   const monthlyRevenue = useMemo(() => {
-    return filteredBills.reduce((sum, bill) => sum + bill.bill_amount, 0);
+    return filteredBills.reduce((sum, bill) => {
+      const inv = bill.gross_invoice_amount || bill.net_amount || ((bill.bill_amount || 0) + (bill.gst_amount || 0));
+      return sum + inv;
+    }, 0);
   }, [filteredBills]);
 
   // Filter label helper
@@ -741,6 +745,81 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
           </div>
         )}
       </div>
+
+      {/* Pending Bills & Memos Alert */}
+      {(() => {
+        const lrsPendingBill = loadingSlips.filter(lr => !lr.bill_number || lr.bill_number === '' || lr.bill_number === 'NOT MENTIONED');
+        const lrsPendingMemo = loadingSlips.filter(lr => !lr.memo_number || lr.memo_number === '' || lr.memo_number === 'NOT MENTIONED');
+        if (lrsPendingBill.length === 0 && lrsPendingMemo.length === 0) return null;
+        return (
+          <div className="bg-white rounded-xl shadow-sm border border-amber-200 p-6">
+            <div className="flex items-center justify-between mb-5">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-lg bg-amber-100 flex items-center justify-center">
+                  <ShieldAlert className="w-5 h-5 text-amber-600" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900">Pending Actions Required</h3>
+                  <p className="text-sm text-gray-500">LRs that still need a Bill or Freight Memo to be created</p>
+                </div>
+              </div>
+              <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-500 text-white">
+                {lrsPendingBill.length + lrsPendingMemo.length} Pending
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {lrsPendingBill.length > 0 && (
+                <div
+                  className="p-4 bg-amber-50 border border-amber-200 rounded-lg cursor-pointer hover:shadow-md transition-all"
+                  onClick={() => onNavigate?.('bills')}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-3xl font-bold text-amber-700">{lrsPendingBill.length}</div>
+                    <span className="text-xs bg-amber-200 text-amber-800 px-2 py-0.5 rounded-full font-semibold">Bills Pending</span>
+                  </div>
+                  <div className="text-sm font-medium text-amber-800 mb-1">LRs without a Bill</div>
+                  <div className="text-xs text-amber-600 mb-3">Click to go to Bills → create bills for these LRs</div>
+                  <div className="space-y-1 max-h-32 overflow-y-auto">
+                    {lrsPendingBill.slice(0, 5).map((lr: any) => (
+                      <div key={lr._id || lr.id} className="text-xs text-gray-600 flex justify-between border-b border-amber-100 pb-0.5">
+                        <span className="font-medium">{lr.slip_number}</span>
+                        <span className="text-gray-500 truncate max-w-[120px]">{lr.party}</span>
+                      </div>
+                    ))}
+                    {lrsPendingBill.length > 5 && (
+                      <div className="text-xs text-amber-600 font-medium pt-1">+{lrsPendingBill.length - 5} more LRs without a bill…</div>
+                    )}
+                  </div>
+                </div>
+              )}
+              {lrsPendingMemo.length > 0 && (
+                <div
+                  className="p-4 bg-orange-50 border border-orange-200 rounded-lg cursor-pointer hover:shadow-md transition-all"
+                  onClick={() => onNavigate?.('memos')}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-3xl font-bold text-orange-700">{lrsPendingMemo.length}</div>
+                    <span className="text-xs bg-orange-200 text-orange-800 px-2 py-0.5 rounded-full font-semibold">Memos Pending</span>
+                  </div>
+                  <div className="text-sm font-medium text-orange-800 mb-1">LRs without a Freight Memo</div>
+                  <div className="text-xs text-orange-600 mb-3">Click to go to Memos → create memos for these LRs</div>
+                  <div className="space-y-1 max-h-32 overflow-y-auto">
+                    {lrsPendingMemo.slice(0, 5).map((lr: any) => (
+                      <div key={lr._id || lr.id} className="text-xs text-gray-600 flex justify-between border-b border-orange-100 pb-0.5">
+                        <span className="font-medium">{lr.slip_number}</span>
+                        <span className="text-gray-500 truncate max-w-[120px]">{lr.supplier || lr.party}</span>
+                      </div>
+                    ))}
+                    {lrsPendingMemo.length > 5 && (
+                      <div className="text-xs text-orange-600 font-medium pt-1">+{lrsPendingMemo.length - 5} more LRs without a memo…</div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Party Ledger Export Section */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
