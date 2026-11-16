@@ -342,14 +342,17 @@ const BillsComponent: React.FC<BillsListProps> = ({ showOnlyFullyReceived = fals
     }
 
     if (!search.trim()) return base;
-    const q = search.toLowerCase();
-    return base.filter(b => {
+    const q = search.trim().toLowerCase();
+
+    // Filter: match bill_number exactly, or match party/amount/vehicle
+    const matched = base.filter(b => {
       const ls = typeof b.loading_slip_id === 'object' && b.loading_slip_id !== null
         ? b.loading_slip_id
         : loadingSlips.find(ls => ls.id === b.loading_slip_id);
       const haystack = [
-        b.bill_number,
-        b.party,
+        b.party || '',
+        b.party_name || '',
+        b.bill_number || '',
         new Date(b.date).toLocaleDateString('en-IN'),
         String(b.bill_amount),
         String(b.net_amount),
@@ -357,7 +360,27 @@ const BillsComponent: React.FC<BillsListProps> = ({ showOnlyFullyReceived = fals
       ]
         .join(' ')
         .toLowerCase();
-      return haystack.includes(q);
+      // For bill_number: use exact suffix match (e.g. "/11" should NOT match "/110")
+      const billNumLower = (b.bill_number || '').toLowerCase();
+      const billNumMatch = billNumLower === q ||
+        billNumLower.endsWith('/' + q.replace(/^.*\//, '')) ||
+        billNumLower.includes(q + ' ') ||
+        // If query contains "/" treat as full bill number search with exact boundary
+        (q.includes('/') ? billNumLower === q || billNumLower.endsWith(q) : false) ||
+        haystack.includes(q);
+      return billNumMatch;
+    });
+
+    // Sort: exact bill_number match first, then prefix, then rest
+    return matched.sort((a, b) => {
+      const aBillLower = (a.bill_number || '').toLowerCase();
+      const bBillLower = (b.bill_number || '').toLowerCase();
+      const aExact = aBillLower === q ? 0 : aBillLower.endsWith('/' + q.replace(/^.*\//, '')) ? 1 : 2;
+      const bExact = bBillLower === q ? 0 : bBillLower.endsWith('/' + q.replace(/^.*\//, '')) ? 1 : 2;
+      if (aExact !== bExact) return aExact - bExact;
+      // Keep original sort for ties
+      const getNum = (bn: string) => { const m = bn.match(/(\d+)$/); return m ? parseInt(m[1], 10) : 0; };
+      return getNum(b.bill_number) - getNum(a.bill_number);
     });
   }, [bills, bankingEntries, cashbookEntries, showOnlyFullyReceived, viewMode, search, loadingSlips, selectedMonths]);
 

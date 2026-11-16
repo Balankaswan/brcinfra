@@ -346,11 +346,12 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
   // ─── Compute full per-party ledger summaries for PDF/Excel export ─────
   const allPartyLedgerSummaries = useMemo((): PartyLedgerSummary[] => {
     // Unique party names from bills
-    const partyNames = Array.from(new Set(bills.map(b => b.party))).sort();
+    const partyNames = Array.from(new Set(bills.map(b => (b.party || b.party_name || '').trim()).filter(Boolean))).sort();
 
     return partyNames.map(partyName => {
+      const partyLower = partyName.toLowerCase();
       const partyBills = bills
-        .filter(b => b.party === partyName)
+        .filter(b => ((b.party || b.party_name || '').trim().toLowerCase() === partyLower))
         .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
       const partyBankingEntries = bankingEntries.filter(entry => {
@@ -418,7 +419,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
         let billAmount = 0, detention = 0, extra = 0, rto = 0, tds = 0, mamool = 0, commission = 0, penalties = 0;
 
         if (entry.type === 'bill') {
-          billAmount = entry.data.bill_amount || 0;
+          const grossInvoice = entry.data.gross_invoice_amount || entry.data.net_amount || (entry.data.bill_amount || 0);
+          billAmount = grossInvoice;
           detention = entry.data.detention || 0;
           extra = entry.data.extra || 0;
           rto = entry.data.rto || 0;
@@ -426,7 +428,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate }) => {
           mamool = entry.data.mamool || 0;
           commission = entry.data.commission || 0;
           penalties = entry.data.penalties || 0;
-          credit = billAmount + detention + extra + rto - mamool - commission - tds - penalties;
+          credit = grossInvoice + detention + extra + rto - mamool - commission - tds - penalties;
 
           const billAdvances = partyBankingEntries.filter(
             be => be.category === 'bill_advance' && be.reference_id === entry.data.bill_number

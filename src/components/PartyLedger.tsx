@@ -65,7 +65,8 @@ const PartyLedger: React.FC<PartyLedgerProps> = ({ selectedParty, onNavigate }) 
       if (name) partySet.add(name);
     });
     (bills || []).forEach(bill => {
-      if (bill.party) partySet.add(bill.party);
+      const p = bill.party || bill.party_name;
+      if (p) partySet.add(p);
     });
     return Array.from(partySet).sort();
   }, [bills, masterParties]);
@@ -83,11 +84,14 @@ const PartyLedger: React.FC<PartyLedgerProps> = ({ selectedParty, onNavigate }) 
 
     parties.forEach(party => {
       const partyLower = party.trim().toLowerCase();
-      const pBills = bills.filter(b => b.party && b.party.trim().toLowerCase() === partyLower);
+      const pBills = bills.filter(b => {
+        const p = (b.party || b.party_name || '').trim().toLowerCase();
+        return p === partyLower;
+      });
 
       let running = 0;
       pBills.forEach(b => {
-        const gross = b.total_invoice_value || b.gross_amount || b.total_amount || b.bill_amount || 0;
+        const gross = b.gross_invoice_amount || b.net_amount || b.total_invoice_value || b.gross_amount || b.total_amount || b.bill_amount || 0;
         running += gross;
       });
 
@@ -133,7 +137,10 @@ const PartyLedger: React.FC<PartyLedgerProps> = ({ selectedParty, onNavigate }) 
 
     // Get all bills for this party
     const partyBills = bills
-      .filter(b => b.party && b.party.trim().toLowerCase() === partyLower)
+      .filter(b => {
+        const p = (b.party || b.party_name || '').trim().toLowerCase();
+        return p === partyLower;
+      })
       .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
     // Get all banking entries for this party
@@ -190,7 +197,7 @@ const PartyLedger: React.FC<PartyLedgerProps> = ({ selectedParty, onNavigate }) 
       if (item.type === 'bill') {
         const bill = item.data;
         // Full Gross Invoice Amount without deductions
-        const grossAmount = bill.total_invoice_value || bill.gross_amount || bill.total_amount || bill.bill_amount || 0;
+        const grossAmount = bill.gross_invoice_amount || bill.net_amount || bill.total_invoice_value || bill.gross_amount || bill.total_amount || bill.bill_amount || 0;
         const debit = grossAmount;
         const credit = 0;
         runningBalance += debit;
