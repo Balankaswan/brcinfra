@@ -106,19 +106,49 @@ struct PremiumDashboardView: View {
     // MARK: - Hero Header
     var heroHeader: some View {
         ZStack(alignment: .bottomLeading) {
-            LinearGradient(
-                colors: [authStore.role.accentColor, authStore.role.accentColor.opacity(0.75)],
-                startPoint: .topLeading, endPoint: .bottomTrailing
-            )
+            // Background photo of BRC Truck with branded overlay
+            GeometryReader { geo in
+                ZStack {
+                    Image("TruckBanner")
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: geo.size.width, height: geo.size.height + geo.safeAreaInsets.top)
+                        .clipped()
+
+                    // Horizontal gradient: dark branded blue on the left for text readability,
+                    // fading to semi-transparent on the right to showcase the truck & cargo
+                    LinearGradient(
+                        colors: [
+                            authStore.role.accentColor.opacity(0.92),
+                            authStore.role.accentColor.opacity(0.70),
+                            authStore.role.accentColor.opacity(0.40)
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+
+                    // Vertical subtle gradient for contrast
+                    LinearGradient(
+                        colors: [
+                            Color.black.opacity(0.20),
+                            Color.clear,
+                            Color.black.opacity(0.35)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
+            }
             .ignoresSafeArea(edges: .top)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Good \(timeOfDay()),")
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(.white.opacity(0.85))
-                Text(authStore.currentUser?.displayName ?? "User")
+                    .foregroundColor(.white.opacity(0.90))
+                Text(authStore.currentUser?.displayName ?? "Admin")
                     .font(.system(size: 26, weight: .bold, design: .rounded))
                     .foregroundColor(.white)
+                    .shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 1)
                 HStack(spacing: 6) {
                     Image(systemName: authStore.role.icon)
                         .font(.caption)
@@ -128,14 +158,15 @@ struct PremiumDashboardView: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
-                .background(.white.opacity(0.2))
+                .background(.ultraThinMaterial.opacity(0.4))
+                .background(.white.opacity(0.25))
                 .clipShape(Capsule())
                 .foregroundColor(.white)
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 24)
         }
-        .frame(height: 160)
+        .frame(height: 175)
     }
 
     // MARK: - KPI Grid
