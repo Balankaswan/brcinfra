@@ -241,9 +241,12 @@ export const useApiSync = () => {
               id: entry.id || entry._id,
             }));
 
-            const uniqueBankingEntries = normalizedBankingEntries.filter((entry: any, index: number, self: any[]) => {
-              const entryId = entry.id || entry._id;
-              return index === self.findIndex((e: any) => (e.id || e._id) === entryId);
+            const seenBankingIds = new Set<string>();
+            const uniqueBankingEntries = normalizedBankingEntries.filter((entry: any) => {
+              const entryId = String(entry.id || entry._id || '');
+              if (!entryId || seenBankingIds.has(entryId)) return false;
+              seenBankingIds.add(entryId);
+              return true;
             });
 
             const mergedMap = new Map<string, any>();
@@ -286,9 +289,12 @@ export const useApiSync = () => {
               id: entry.id || entry._id,
             }));
 
-            const uniqueCashbookEntries = normalizedCashbookEntries.filter((entry: any, index: number, self: any[]) => {
-              const entryId = entry.id || entry._id;
-              return index === self.findIndex((e: any) => (e.id || e._id) === entryId);
+            const seenCashbookIds = new Set<string>();
+            const uniqueCashbookEntries = normalizedCashbookEntries.filter((entry: any) => {
+              const entryId = String(entry.id || entry._id || '');
+              if (!entryId || seenCashbookIds.has(entryId)) return false;
+              seenCashbookIds.add(entryId);
+              return true;
             });
 
             const mergedCashMap = new Map<string, any>();

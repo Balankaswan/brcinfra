@@ -72,91 +72,100 @@ const BankingForm: React.FC<BankingFormProps> = ({ onSubmit, onCancel, editingEn
 
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Function to calculate actual bill balance
+  // Fast O(1) Pre-indexed Payment Lookups
+  const billPaymentsMap = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const e of bankingEntries) {
+      if (e.type === 'credit' && e.reference_id) {
+        map.set(e.reference_id, (map.get(e.reference_id) || 0) + (e.amount || 0));
+      }
+    }
+    for (const e of cashbookEntries) {
+      if (e.type === 'credit' && e.reference_id) {
+        map.set(e.reference_id, (map.get(e.reference_id) || 0) + (e.amount || 0));
+      }
+    }
+    return map;
+  }, [bankingEntries, cashbookEntries]);
+
+  const memoPaymentsMap = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const e of bankingEntries) {
+      if ((e.category === 'memo_advance' || e.category === 'memo_payment') && e.reference_id) {
+        map.set(e.reference_id, (map.get(e.reference_id) || 0) + (e.amount || 0));
+      }
+    }
+    for (const e of cashbookEntries) {
+      if ((e.category === 'memo_advance' || e.category === 'memo_payment') && e.reference_id) {
+        map.set(e.reference_id, (map.get(e.reference_id) || 0) + (e.amount || 0));
+      }
+    }
+    return map;
+  }, [bankingEntries, cashbookEntries]);
+
+  const loadingSlipsMap = useMemo(() => {
+    const map = new Map<string, any>();
+    for (const ls of loadingSlips) {
+      if (ls.id) map.set(String(ls.id), ls);
+      if ((ls as any)._id) map.set(String((ls as any)._id), ls);
+    }
+    return map;
+  }, [loadingSlips]);
+
+  // Function to calculate actual bill balance (O(1) lookup)
   const calculateBillBalance = (bill: any) => {
-    // Calculate what party owes: freight - mamool - commission + detention + rto + extra - tds - penalties
-    const partyOwes = bill.bill_amount - (bill.mamool || 0) - (bill.commission || 0) + (bill.detention || 0) + (bill.rto || 0) + (bill.extra || 0) - (bill.tds || 0) - (bill.penalties || 0);
-    
-    // Find all payments for this bill from banking entries
-    const bankingPayments = bankingEntries
-      .filter(entry => {
-        const matchesReference = entry.reference_id === bill.bill_number;
-        const isCredit = entry.type === 'credit';
-        return matchesReference && isCredit;
-      })
-      .reduce((total, entry) => total + entry.amount, 0);
-    
-    // Find all payments for this bill from cashbook entries
-    const cashbookPayments = cashbookEntries
-      .filter(entry => {
-        const matchesReference = entry.reference_id === bill.bill_number;
-        const isCredit = entry.type === 'credit';
-        return matchesReference && isCredit;
-      })
-      .reduce((total, entry) => total + entry.amount, 0);
-    
-    const totalPayments = bankingPayments + cashbookPayments;
+    const grossInvoice = bill.gross_invoice_amount || bill.net_amount || bill.bill_amount || 0;
+    const partyOwes = grossInvoice - (bill.mamool || 0) - (bill.commission || 0) + (bill.detention || 0) + (bill.rto || 0) + (bill.extra || 0) - (bill.tds || 0) - (bill.penalties || 0);
+    const totalPayments = billPaymentsMap.get(bill.bill_number) || 0;
     const pendingBalance = Math.max(0, partyOwes - totalPayments);
-    
-    return {
-      partyOwes,
-      totalPayments,
-      pendingBalance
-    };
+    return { partyOwes, totalPayments, pendingBalance };
   };
 
-  // Function to calculate pending amount owed to supplier for a memo
+  // Function to calculate pending amount owed to supplier for a memo (O(1) lookup)
   const calculateMemoBalance = (memo: any) => {
-    // Net amount the company owes the supplier
     const supplierOwed = memo.net_amount || 0;
-
-    // Payments already made via banking debit entries
-    const bankingPayments = bankingEntries
-      .filter(e =>
-        (e.category === 'memo_advance' || e.category === 'memo_payment') &&
-        e.reference_id === memo.memo_number
-      )
-      .reduce((sum, e) => sum + e.amount, 0);
-
-    // Payments already made via cashbook debit entries
-    const cashbookPayments = cashbookEntries
-      .filter(e =>
-        (e.category === 'memo_advance' || e.category === 'memo_payment') &&
-        e.reference_id === memo.memo_number
-      )
-      .reduce((sum, e) => sum + e.amount, 0);
-
-    // Fuel advances already tagged to this memo
+    const totalPayments = memoPaymentsMap.get(memo.memo_number) || 0;
     const fuelAdvances = (memo.advance_payments || [])
       .filter(isFuelAdvance)
       .reduce((sum: number, a: any) => sum + (a.amount || 0), 0);
-
-    const totalPaid = bankingPayments + cashbookPayments + fuelAdvances;
+    const totalPaid = totalPayments + fuelAdvances;
     const pendingBalance = Math.max(0, supplierOwed - totalPaid);
-
     return { supplierOwed, totalPaid, pendingBalance };
   };
+
+  // Pre-filter and memoize pending bills for the selected party
+  const partyPendingBills = useMemo(() => {
+    if (!formData.reference_name || (formData.category !== 'bill_advance' && formData.category !== 'bill_payment')) {
+      return [];
+    }
+    const targetParty = formData.reference_name.trim().toLowerCase();
+    return bills
+      .filter(b => (b.party || (b as any).party_name || '').trim().toLowerCase() === targetParty)
+      .map(bill => {
+        const { pendingBalance } = calculateBillBalance(bill);
+        return { bill, pendingBalance };
+      })
+      .filter(({ pendingBalance }) => pendingBalance > 0);
+  }, [bills, formData.reference_name, formData.category, billPaymentsMap]);
 
   // All pending memos — enriched with loading slip data, sorted newest-first
   const pendingMemosEnriched = useMemo(() => {
     return memos
       .map(memo => {
         const { pendingBalance } = calculateMemoBalance(memo);
-        // Resolve loading slip (may be populated object or string ID)
-        const slip = typeof memo.loading_slip_id === 'object' && memo.loading_slip_id !== null
-          ? memo.loading_slip_id as any
-          : loadingSlips.find(ls => ls.id === memo.loading_slip_id || (ls as any)._id === memo.loading_slip_id);
+        const slipId = typeof memo.loading_slip_id === 'object' && memo.loading_slip_id !== null
+          ? (memo.loading_slip_id as any).id || (memo.loading_slip_id as any)._id
+          : memo.loading_slip_id;
+        const slip = slipId ? loadingSlipsMap.get(String(slipId)) : undefined;
         return { memo, pendingBalance, slip };
       })
       .filter(({ pendingBalance }) => pendingBalance > 0)
-      // Newest memo first (highest memo number / latest created_at)
       .sort((a, b) => {
         const dateA = new Date(a.memo.created_at || a.memo.date || 0).getTime();
         const dateB = new Date(b.memo.created_at || b.memo.date || 0).getTime();
         return dateB - dateA;
       });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [memos, loadingSlips, bankingEntries, cashbookEntries]);
+  }, [memos, loadingSlipsMap, memoPaymentsMap]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -293,7 +302,6 @@ const BankingForm: React.FC<BankingFormProps> = ({ onSubmit, onCancel, editingEn
     if (formData.category.includes('bill')) {
       return existingBills;
     } else if (formData.category.includes('memo')) {
-      console.log(`📋 Memo search: Found ${existingMemos.length} memos:`, existingMemos);
       return existingMemos;
     } else if (formData.category === 'party_commission' || formData.category === 'party_on_account') {
       return parties.map(p => p.name).filter(Boolean);
@@ -520,33 +528,21 @@ const BankingForm: React.FC<BankingFormProps> = ({ onSubmit, onCancel, editingEn
                       required
                     >
                       <option key="select-bill" value="">Select Bill</option>
-                      {bills
-                        .filter(bill => bill.party === formData.reference_name)
-                        .filter(bill => {
-                          // Only show bills with pending balance > 0
-                          const { pendingBalance } = calculateBillBalance(bill);
-                          return pendingBalance > 0;
-                        })
-                        .map((bill, index) => {
-                          // Calculate actual pending balance
-                          const { pendingBalance } = calculateBillBalance(bill);
-                          
-                          return (
-                            <option 
-                              key={bill.id || bill.bill_number || `bill-${index}-${bill.bill_number}`} 
-                              value={bill.bill_number}
-                            >
-                              {bill.bill_number} - {(bill.loading_slip_id as any)?.vehicle_no || 'No Vehicle'} - ₹{pendingBalance.toLocaleString('en-IN')} (Pending)
-                            </option>
-                          );
-                        })}
+                      {partyPendingBills.map(({ bill, pendingBalance }, index) => {
+                        const vehicleNo = (bill.loading_slip_id as any)?.vehicle_no || 'No Vehicle';
+                        return (
+                          <option 
+                            key={bill.id || bill.bill_number || `bill-${index}-${bill.bill_number}`} 
+                            value={bill.bill_number}
+                          >
+                            {bill.bill_number} - {vehicleNo} - ₹{pendingBalance.toLocaleString('en-IN')} (Pending)
+                          </option>
+                        );
+                      })}
                     </select>
-                    {bills.filter(bill => bill.party === formData.reference_name && calculateBillBalance(bill).pendingBalance > 0).length === 0 && (
+                    {partyPendingBills.length === 0 && (
                       <p className="text-sm text-gray-500 mt-1">
-                        {bills.filter(bill => bill.party === formData.reference_name).length === 0 
-                          ? `No bills found for ${formData.reference_name}`
-                          : `No pending bills for ${formData.reference_name} (all bills are fully paid)`
-                        }
+                        No pending bills for {formData.reference_name} (all bills are fully settled or none found)
                       </p>
                     )}
                   </div>
