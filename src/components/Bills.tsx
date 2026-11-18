@@ -344,41 +344,50 @@ const BillsComponent: React.FC<BillsListProps> = ({ showOnlyFullyReceived = fals
     if (!search.trim()) return base;
     const q = search.trim().toLowerCase();
 
-    // Filter: match bill_number exactly, or match party/amount/vehicle
+    // Filter: exact bill number OR party/date/amount/LR substring
+    // IMPORTANT: bill_number is handled separately (not in haystack) to prevent
+    // "11" matching "AHD/2026-27/110" or "AHD/2026-27/211" as substrings.
+    const isExactBillMatch = (billNum: string): boolean => {
+      const bn = billNum.toLowerCase();
+      if (bn === q) return true;
+      // Strip any "ahd/YYYY-YY/" prefix from query so user can type just "11"
+      const qNum = q.replace(/^ahd\/\d{4}-\d{2,4}\//, '');
+      if (/^\d+$/.test(qNum)) {
+        // Must end with exactly "/<number>" — not "/<number><more digits>"
+        return new RegExp('\\/' + qNum + '$').test(bn);
+      }
+      // If query has slashes, treat as partial bill number pattern
+      if (q.includes('/')) return bn.includes(q);
+      return false;
+    };
+
     const matched = base.filter(b => {
       const ls = typeof b.loading_slip_id === 'object' && b.loading_slip_id !== null
         ? b.loading_slip_id
         : loadingSlips.find(ls => ls.id === b.loading_slip_id);
+      // Haystack EXCLUDES bill_number string to prevent numeric substring false-matches
       const haystack = [
         b.party || '',
         b.party_name || '',
-        b.bill_number || '',
         new Date(b.date).toLocaleDateString('en-IN'),
-        String(b.bill_amount),
-        String(b.net_amount),
+        String(b.bill_amount || ''),
+        String(b.net_amount || ''),
         ls?.vehicle_no || '',
+        ...(b.linked_lr_numbers || []),
       ]
         .join(' ')
         .toLowerCase();
-      // For bill_number: use exact suffix match (e.g. "/11" should NOT match "/110")
-      const billNumLower = (b.bill_number || '').toLowerCase();
-      const billNumMatch = billNumLower === q ||
-        billNumLower.endsWith('/' + q.replace(/^.*\//, '')) ||
-        billNumLower.includes(q + ' ') ||
-        // If query contains "/" treat as full bill number search with exact boundary
-        (q.includes('/') ? billNumLower === q || billNumLower.endsWith(q) : false) ||
-        haystack.includes(q);
-      return billNumMatch;
+
+      if (isExactBillMatch(b.bill_number || '')) return true;
+      if (haystack.includes(q)) return true;
+      return false;
     });
 
-    // Sort: exact bill_number match first, then prefix, then rest
+    // Sort: exact bill number match (score 0) always above other matches (score 1)
     return matched.sort((a, b) => {
-      const aBillLower = (a.bill_number || '').toLowerCase();
-      const bBillLower = (b.bill_number || '').toLowerCase();
-      const aExact = aBillLower === q ? 0 : aBillLower.endsWith('/' + q.replace(/^.*\//, '')) ? 1 : 2;
-      const bExact = bBillLower === q ? 0 : bBillLower.endsWith('/' + q.replace(/^.*\//, '')) ? 1 : 2;
-      if (aExact !== bExact) return aExact - bExact;
-      // Keep original sort for ties
+      const aScore = isExactBillMatch(a.bill_number || '') ? 0 : 1;
+      const bScore = isExactBillMatch(b.bill_number || '') ? 0 : 1;
+      if (aScore !== bScore) return aScore - bScore;
       const getNum = (bn: string) => { const m = bn.match(/(\d+)$/); return m ? parseInt(m[1], 10) : 0; };
       return getNum(b.bill_number) - getNum(a.bill_number);
     });
