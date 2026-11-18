@@ -2,12 +2,33 @@ import { useEffect, useRef, useState } from 'react';
 import { apiService } from '../lib/api';
 import { useDataStore } from '../lib/store';
 
+// ── Cache version: bump this string to force-clear all users' stale localStorage ──
+// Last bumped: 2026-11-18 (fix: stale bills cache hiding AEGIOS/old bills)
+const CACHE_VERSION = 'brc_v3_20261118';
+
+function clearStaleCache() {
+  const stored = localStorage.getItem('brc_cache_version');
+  if (stored !== CACHE_VERSION) {
+    console.log('[BRC] Cache version mismatch — clearing stale localStorage');
+    // Clear all BRC data keys but preserve auth token and user prefs
+    const keysToRemove = Object.keys(localStorage).filter(k =>
+      k.startsWith('brc_') && k !== 'brc_cache_version'
+    );
+    keysToRemove.forEach(k => localStorage.removeItem(k));
+    localStorage.setItem('brc_cache_version', CACHE_VERSION);
+    console.log(`[BRC] Cleared ${keysToRemove.length} stale cache keys`);
+  }
+}
+
 export const useApiSync = () => {
   const store = useDataStore();
   const [isRealTimeConnected, setIsRealTimeConnected] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const syncTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const syncDataRef = useRef<any>(null); // Store syncData function reference
+
+  // Run cache-clear check immediately on mount (before first sync)
+  useEffect(() => { clearStaleCache(); }, []);
 
   useEffect(() => {
     // ── Debounced sync handler — defined ONCE, registered ONCE ──
