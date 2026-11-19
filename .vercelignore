@@ -1,0 +1,6 @@
+backend/
+BRCInfra-iOS/
+.env
+.env.local
+*.cjs
+*.sh
